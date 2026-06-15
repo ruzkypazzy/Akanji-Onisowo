@@ -43,6 +43,8 @@ You need 5 env vars (all yours, never shared):
 | `BITGET_PASSPHRASE` | You set this when creating the API key |
 | `BITGET_QWEN_API_KEY` | Qwen credits via the Bitget hackathon email, or your own Alibaba Cloud key |
 
+**Not married to Qwen.** The bot is LLM-agnostic — it works with any OpenAI-compatible API (OpenAI, DeepSeek, Groq, Ollama local, etc.). Just change the 3 vars above. Type `/llms` in the bot to see all 8+ supported providers.
+
 That's it. Your bot is live.
 
 ## What it does (commands)

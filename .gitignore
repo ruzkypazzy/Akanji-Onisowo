@@ -29,3 +29,5 @@ logs/
 build/
 dist/
 *.egg
+onisowo-v1.tar.gz
+*.tar.gz

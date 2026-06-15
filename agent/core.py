@@ -27,7 +27,14 @@ from risk.engine import RiskEngine
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are Ọniṣọwọ́ (Oniṣòwò), a Yoruba AI trading agent running in Telegram.
+def _build_system_prompt() -> str:
+    """Build the system prompt with the current LLM model name (auto-detected from env)."""
+    # Auto-detect model name from env (works for any OpenAI-compatible LLM)
+    model = os.environ.get("QWEN_MODEL", "qwen3.6-plus").strip()
+    # Friendly display name (e.g. "gpt-4o" -> "GPT-4o", "llama-3.1-70b" -> "Llama 3.1 70B")
+    display = _friendly_model_name(model)
+
+    return f"""You are Ọniṣọwọ́ (Oniṣòwò), a Yoruba AI trading agent running in Telegram, powered by {display}.
 
 You are a **trader** — patient, analytical, risk-aware. You trade crypto on Bitget.
 
@@ -62,6 +69,36 @@ When the user asks you to trade:
 Format your response in clean Telegram-friendly markdown.
 Be concise. Use emoji sparingly. Show the math, not the hype.
 """
+
+
+def _friendly_model_name(model_id: str) -> str:
+    """Turn 'qwen3.6-plus' into 'Qwen 3.6 Plus', 'gpt-4o-mini' into 'GPT-4o mini', etc."""
+    if not model_id:
+        return "an LLM"
+    # Common mappings
+    mapping = {
+        "qwen3.6-plus": "Qwen 3.6 Plus",
+        "qwen3.6-flash": "Qwen 3.6 Flash",
+        "gpt-4o": "GPT-4o",
+        "gpt-4o-mini": "GPT-4o mini",
+        "gpt-4-turbo": "GPT-4 Turbo",
+        "gpt-3.5-turbo": "GPT-3.5 Turbo",
+        "deepseek-chat": "DeepSeek Chat",
+        "deepseek-coder": "DeepSeek Coder",
+        "llama-3.1-70b": "Llama 3.1 70B",
+        "llama-3.1-8b": "Llama 3.1 8B",
+        "mixtral-8x7b": "Mixtral 8x7B",
+        "MiniMax-M3": "Minimax M3",
+        "MiniMax-M2.7": "Minimax M2.7",
+    }
+    if model_id in mapping:
+        return mapping[model_id]
+    # Fallback: title-case + replace dashes with spaces
+    return model_id.replace("-", " ").title()
+
+
+# Built once at import time, then re-built if env changes (e.g., tests)
+SYSTEM_PROMPT = _build_system_prompt()
 
 
 @dataclass
@@ -162,14 +199,22 @@ class Agent:
             "*Meta:*\n"
             "• `/reflect` — recursive self-improvement review\n"
             "• `/memory` — show recent memory entries\n"
+            "• `/llm` — which LLM is powering me right now\n"
+            "• `/llms` — list of supported LLM providers\n"
             "• `/about` — about this bot"
         )
 
     def _cmd_about(self, ctx: AgentContext) -> str:
+        model = os.environ.get("QWEN_MODEL", "qwen3.6-plus")
+        display = _friendly_model_name(model)
+        base_url = os.environ.get("QWEN_BASE_URL", "https://hackathon.bitgetops.com/v1")
         return (
             "*Oniṣòwò* (oh-nee-SHAW-woh) — Yoruba for *merchant*.\n\n"
             "Built by [@ruzkypazzy](https://github.com/ruzkypazzy) for the "
             "[Bitget AI Base Camp Hackathon S1](https://bitget-ai.gitbook.io/base-camp-hackathon-s1-en).\n\n"
+            f"*LLM brain:* {display}\n"
+            f"*Endpoint:* `{base_url}`\n"
+            "*Swap to any OpenAI-compatible API via the 3 env vars:* `QWEN_BASE_URL`, `BITGET_QWEN_API_KEY`, `QWEN_MODEL`\n\n"
             "*Stack:*\n"
             "• LLM: Qwen 3.6-plus (Alibaba Cloud, via Bitget hackathon proxy)\n"
             "• Exchange: Bitget spot + futures\n"
@@ -323,6 +368,62 @@ class Agent:
                 + ("..." if len(m["content"]) > 100 else "")
             )
         return "\n".join(lines)
+
+    def _cmd_llm(self, ctx: AgentContext) -> str:
+        """Show which LLM is currently powering Oniṣòwò."""
+        model = os.environ.get("QWEN_MODEL", "qwen3.6-plus")
+        base_url = os.environ.get("QWEN_BASE_URL", "https://hackathon.bitgetops.com/v1")
+        display = _friendly_model_name(model)
+        key_present = bool(os.environ.get("BITGET_QWEN_API_KEY"))
+        key_status = "✓ set" if key_present else "✗ missing"
+        return (
+            f"*Current LLM brain* 🧠\n\n"
+            f"Model: *{display}* (`{model}`)\n"
+            f"Endpoint: `{base_url}`\n"
+            f"API key: `{key_status}`\n\n"
+            f"To switch: edit `.env` and change the 3 vars:\n"
+            f"  `QWEN_BASE_URL`, `BITGET_QWEN_API_KEY`, `QWEN_MODEL`\n"
+            f"Type `/llms` to see all supported providers."
+        )
+
+    def _cmd_llms(self, ctx: AgentContext) -> str:
+        """Show supported LLM providers (anything OpenAI-compatible)."""
+        return (
+            "*Supported LLM providers* 🧠\n\n"
+            "Oniṣòwò is *LLM-agnostic* — it works with any *OpenAI-compatible* API. "
+            "Default is Qwen 3.6 Plus (mandated by the Bitget hackathon), but you can swap in seconds.\n\n"
+            "*How to switch:* edit `.env`, change 3 vars, restart.\n\n"
+            "*Verified-compatible providers:*\n\n"
+            "• *Qwen* (Alibaba) — `https://hackathon.bitgetops.com/v1`\n"
+            "  Models: `qwen3.6-plus`, `qwen3.6-flash`\n"
+            "  _Free $30 credit via Bitget hackathon email_\n\n"
+            "• *OpenAI* — `https://api.openai.com/v1`\n"
+            "  Models: `gpt-4o`, `gpt-4o-mini`, `gpt-3.5-turbo`\n\n"
+            "• *Anthropic Claude* — ❌ not directly (uses own SDK)\n"
+            "  _Workaround: route via OpenRouter or LiteLLM proxy_\n\n"
+            "• *DeepSeek* — `https://api.deepseek.com/v1`\n"
+            "  Models: `deepseek-chat`, `deepseek-coder`\n"
+            "  _Very cheap, OpenAI-compatible_\n\n"
+            "• *Groq* — `https://api.groq.com/openai/v1`\n"
+            "  Models: `llama-3.1-70b-versatile`, `mixtral-8x7b-32768`\n"
+            "  _Blazing fast inference, free tier_\n\n"
+            "• *Ollama* (local) — `http://localhost:11434/v1`\n"
+            "  Models: any (`llama3`, `mistral`, `qwen2.5`, etc.)\n"
+            "  _Runs offline on your machine, free_\n\n"
+            "• *Together AI* — `https://api.together.xyz/v1`\n"
+            "  Models: `meta-llama/Llama-3-70b-chat-hf`, etc.\n\n"
+            "• *OpenRouter* — `https://openrouter.ai/api/v1`\n"
+            "  Models: 100+ (routes to any provider)\n\n"
+            "• *Minimax* — `https://api.minimax.io/v1`\n"
+            "  Models: `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.5`\n\n"
+            "*Example: switch to local Ollama:*\n"
+            "```\n"
+            "QWEN_BASE_URL=http://localhost:11434/v1\n"
+            "BITGET_QWEN_API_KEY=ollama  # any non-empty string works\n"
+            "QWEN_MODEL=llama3\n"
+            "```\n\n"
+            "_Not on the list? Try it anyway. If it speaks OpenAI protocol, it'll work._"
+        )
 
     def _cmd_reflect(self, ctx: AgentContext) -> str:
         """Recursive self-improvement: review last 7 days of trades."""

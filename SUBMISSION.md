@@ -22,9 +22,10 @@
 - **MEV-aware execution** — checks sandwich-attack risk before every swap
 - **Sybil counterparty scoring** — refuses to enter positions with 60%+ sybil clusters
 - **Recursive self-improvement** — reviews last 7 days of trades, writes a new rule to memory every Sunday
+- **LLM-agnostic** — works with Qwen (default), OpenAI, DeepSeek, Groq, local Ollama, or any OpenAI-compatible API. Switch via 3 env vars.
 - **Self-hostable** — your keys never leave your machine, no central DB, no custody
 
-**Built with**: Bitget Agent Hub (spot + futures APIs, 58 tools), Qwen 3.6-plus (LLM), Telegram (surface), SQLite (memory), Python 3.10+.
+**Built with**: Bitget Agent Hub (spot + futures APIs, 58 tools), Qwen 3.6-plus (LLM, swappable), Telegram (surface), SQLite (memory), Python 3.10+.
 
 **Hackathon tracks** (bitget-ai.gitbook.io/base-camp-hackathon-s1-en): Track 1 — Trading Agent. Submission: demo link (Telegram bot, public, anyone can message) + this 200-word writeup. Code: github.com/ruzkypazzy/Onisowo (MIT).
 

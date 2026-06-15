@@ -40,7 +40,9 @@ HELP_TEXT = (
     "*/journal* — recent trade journal\n"
     "*/review* — 7-day review\n"
     "*/reflect* — recursive self-improvement\n"
-    "*/memory* — show memory\n\n"
+    "*/memory* — show memory\n"
+    "*/llm* — which LLM is powering me\n"
+    "*/llms* — supported LLM providers\n\n"
     "*/risk* — risk engine state\n"
     "*/kill REASON* — activate kill switch\n"
     "*/release* — release kill switch\n"
@@ -80,7 +82,8 @@ def parse_command_args(text: str) -> tuple[str, dict]:
         return (cmd, {"name": parts2[0] if parts2 else "", "extra": parts2[1].split() if len(parts2) > 1 else []})
 
     if cmd in ("start", "help", "about", "status", "balance", "skills", "journal",
-               "review", "reflect", "memory", "risk", "release", "settings", "pnl"):
+               "review", "reflect", "memory", "risk", "release", "settings", "pnl",
+               "llm", "llms"):
         return (cmd, {})
 
     return ("ask", {"text": text})
