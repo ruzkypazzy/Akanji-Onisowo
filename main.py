@@ -53,8 +53,8 @@ def main():
     print()
 
     # Run the bot
-    from telegram.bot import run_bot
-    run_bot()
+    from tgbot.bot import run_bot as _run
+    _run()
 
 
 if __name__ == "__main__":
