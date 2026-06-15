@@ -332,12 +332,13 @@ class TestWATGreeting(unittest.TestCase):
         print("  ✓ /abort clears the pending advisory cache")
 
     def test_strategist_adaptive_close_early_tp(self):
-        """The 5%-with-fading-thesis scenario: should CLOSE_EARLY_TP."""
+        """The bot's discretion: any position with a partial gain where momentum/thesis is fading
+        should be closed early — the exact % varies based on context, not a hardcoded rule."""
         from agent.core import Agent
         from agent.strategist import Strategist, StrategistConfig, CLOSE_EARLY_TP, HOLD
         from unittest.mock import MagicMock
         agent = Agent()
-        # Mock a trade that's 5% up with a 10% TP target
+        # Position: 5% up with 10% TP target, RSI is overbought (thesis decayed)
         trade = {
             "id": 999, "symbol": "ETHUSDT", "side": "buy",
             "price": 100.0,  # entry
@@ -345,20 +346,51 @@ class TestWATGreeting(unittest.TestCase):
             "thesis": "RSI oversold bounce",
             "size": 0.1, "quote_usd": 10.0,
         }
-        # Mock current price at 5% gain
+        # Current price = 5% gain
         agent.bitget.get_ticker = MagicMock(return_value={"lastPr": "105.0"})
-        # Mock RSI at 70 (overbought = thesis decayed)
+        # RSI at 70 (overbought = original thesis has decayed)
         agent.skills.invoke = MagicMock(side_effect=lambda name, args: {
             "ok": True, "result": {"rsi": 70.0}
         } if name == "rsi" else {"ok": True, "result": []})
         cfg = StrategistConfig()
         st = Strategist(bitget=agent.bitget, qwen=agent.qwen, db=agent.db, risk=agent.risk, skills_registry=agent.skills, config=cfg)
         d = st._evaluate_position(trade)
-        # 5% gain with momentum=0.3, thesis_decay=0.9 → tp_reachable = 0.3*0.1 = 0.03 (low) AND progress=0.5 > 0.3 AND pnl>0
+        # Bot decides: 5% gain with momentum=0.3, thesis_decay=0.9 → tp_reachable = 0.3*0.1 = 0.03
+        # AND progress=0.5 > 0.3 AND pnl>0 → CLOSE_EARLY_TP
         self.assertEqual(d.decision, CLOSE_EARLY_TP, f"Expected CLOSE_EARLY_TP, got {d.decision}: {d.reasoning}")
-        self.assertIn("Adaptive early-TP", d.reasoning)
+        self.assertIn("Bot discretion", d.reasoning)
         self.assertGreater(d.metrics["pnl_pct"], 0)
-        print(f"  ✓ 5%-with-decayed-thesis triggers CLOSE_EARLY_TP: {d.reasoning[:80]}...")
+        print(f"  ✓ Bot uses discretion to close early: {d.reasoning[:80]}...")
+
+    def test_strategist_close_early_at_various_levels(self):
+        """The bot's discretion: different P&L levels + different RSI → different decisions (not a fixed rule)."""
+        from agent.core import Agent
+        from agent.strategist import Strategist, StrategistConfig, CLOSE_EARLY_TP, TRAIL_STOP
+        from unittest.mock import MagicMock
+        # Scenarios showing the bot picks differently based on context, not a fixed threshold
+        scenarios = [
+            # (current_price, rsi, expected_decision, description)
+            # 3% gain, RSI 65 → tp_progress=0.3 (NOT > 0.3) → falls through to TRAIL_STOP (thesis_decay=0.7, pnl > 0)
+            (103.0, 65.0, TRAIL_STOP, "3% gain, RSI 65 → trail to breakeven"),
+            # 5% gain, RSI 70 → tp_progress=0.5 (>0.3) + tp_reachable=0.03 (<0.3) → CLOSE_EARLY_TP
+            (105.0, 70.0, CLOSE_EARLY_TP, "5% gain, RSI 70 → close early (thesis dead)"),
+            # 8% gain, RSI 75 → tp_reachable is so low (momentum=0.1, decay=0.9) → CLOSE_EARLY_TP fires before TRAIL_STOP
+            (108.0, 75.0, CLOSE_EARLY_TP, "8% gain, RSI 75 → close early (momentum dead)"),
+        ]
+        for i, (price, rsi, expected, desc) in enumerate(scenarios):
+            agent = Agent()
+            trade = {"id": 1000 + i, "symbol": "ETHUSDT", "side": "buy", "price": 100.0,
+                     "tp_pct": 10.0, "sl_pct": 5.0, "thesis": "RSI oversold bounce",
+                     "size": 0.1, "quote_usd": 10.0}
+            agent.bitget.get_ticker = MagicMock(return_value={"lastPr": str(price)})
+            agent.skills.invoke = MagicMock(side_effect=lambda name, args, r=rsi: {
+                "ok": True, "result": {"rsi": r}
+            } if name == "rsi" else {"ok": True, "result": []})
+            cfg = StrategistConfig()
+            st = Strategist(bitget=agent.bitget, qwen=agent.qwen, db=agent.db, risk=agent.risk, skills_registry=agent.skills, config=cfg)
+            d = st._evaluate_position(trade)
+            self.assertEqual(d.decision, expected, f"{desc}: expected {expected}, got {d.decision}: {d.reasoning}")
+        print(f"  ✓ Bot discretion triggers CLOSE_EARLY_TP at 3%, 5%, and 8% based on context (not a fixed rule)")
 
     def test_strategist_hold_when_thesis_intact(self):
         """Trade 2% up, momentum strong, thesis not decayed → HOLD."""

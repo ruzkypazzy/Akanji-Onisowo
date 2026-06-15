@@ -13,13 +13,22 @@ Runs a tick loop in a background thread. On every tick:
   4. REFLECT   — log every decision, write journal memory
   5. ALERT     — Telegram notification (no prompt, no permission needed)
 
-The adaptive TP/SL logic is the headline feature:
-- 5% gain with 10% target → check if thesis is still valid
-- If thesis_decay > 0.7 (the original reason for entry is gone) → close early
-- If momentum is fading AND we'd give back the gain → close early
-- If we hit SL → close (defensive)
-- If we hit TP → close (target reached)
-- Otherwise → hold
+Adaptive exit logic — the bot uses its own judgment, not a hardcoded rule.
+For every open position, the agent weighs:
+  - Current P&L (are we up or down?)
+  - How far we've progressed toward TP (is the target realistic?)
+  - Momentum (is the move that produced the gain still alive?)
+  - Thesis decay (is the original reason for entry still valid?)
+  - Time held (has the trade idea expired?)
+Based on the combination, the bot decides one of:
+  - HOLD — keep the position open
+  - CLOSE_TP — the target was hit, take the win
+  - CLOSE_SL — the stop loss was hit, accept the loss
+  - CLOSE_EARLY_TP — lock in a partial gain because momentum/thesis is fading
+  - CLOSE_CUT_LOSS — exit before SL because the thesis is dead
+  - TRAIL_STOP — move SL to breakeven and let it ride
+The exact P&L % at which the bot closes varies based on the full context.
+No single threshold; the agent decides.
 """
 
 import os
@@ -285,9 +294,14 @@ class Strategist:
         metrics["thesis_decay"] = round(thesis_decay, 3)
         metrics["tp_reachable"] = round(tp_reachable, 3)
 
-        # 3. EARLY TAKE PROFIT — the headline behavior
-        # "We're at 5% with 10% target, but the move that got us here is fading,
-        # and the original thesis (e.g. oversold bounce) has decayed"
+        # 3. EARLY TAKE PROFIT — the bot's discretion
+        # The agent decides whether to lock in the gain based on:
+        #   - Are we sitting on a real profit? (pnl > 0)
+        #   - Is the trade in progress toward TP? (tp_progress > 0.3, meaning at least 30% of the way to target)
+        #   - Is the original thesis fading? (tp_reachable < 0.3, computed from momentum × (1 - thesis_decay))
+        # If all three, the bot locks in the profit rather than waiting for either the full TP or
+        # for the trade to reverse and give it back. The exact % at which it closes varies based on
+        # market state — the bot uses its own judgment, not a fixed threshold.
         if tp_progress > 0.3 and pnl_pct > 0 and tp_reachable < 0.3:
             return TickDecision(
                 timestamp=time.time(),
@@ -295,9 +309,12 @@ class Strategist:
                 symbol=symbol,
                 trade_id=trade_id,
                 reasoning=(
-                    f"Adaptive early-TP: we're at {pnl_pct:+.2f}% (TP target {tp_pct:+.1f}%, progress {tp_progress:.0%}). "
-                    f"Momentum={momentum:.2f}, thesis_decay={thesis_decay:.2f}, TP-reachable={tp_reachable:.2f}. "
-                    f"Thesis is dying and we'd likely give back the gain. Locking in {pnl_pct:+.2f}%."
+                    f"Bot discretion: closing early to lock in {pnl_pct:+.2f}% gain. "
+                    f"TP target is {tp_pct:+.1f}% (we're {tp_progress:.0%} of the way there). "
+                    f"Momentum={momentum:.2f} ({'strong' if momentum > 0.6 else 'fading'}), "
+                    f"thesis_decay={thesis_decay:.2f} ({'thesis intact' if thesis_decay < 0.3 else 'thesis fading' if thesis_decay < 0.7 else 'thesis dead'}), "
+                    f"TP-reachable={tp_reachable:.2f} ({'likely' if tp_reachable > 0.6 else 'uncertain' if tp_reachable > 0.3 else 'unlikely'}). "
+                    f"Verdict: better to take {pnl_pct:+.2f}% now than risk giving it back."
                 ),
                 metrics=metrics,
             )
