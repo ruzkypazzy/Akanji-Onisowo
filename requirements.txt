@@ -5,7 +5,7 @@
 openai>=1.30.0
 
 # Telegram bot
-python-telegram-bot>=21.0
+python-telegram-bot>=20.0,<21.0
 
 # Bitget API + signing
 requests>=2.31.0
