@@ -568,6 +568,94 @@ class TestWATGreeting(unittest.TestCase):
         self.assertIn("TP:", out)
         print(f"  ✓ /proceed with SL/TP overrides works: {out[:80]}...")
 
+    def test_conviction_decay_scores_correctly(self):
+        """conviction_decay: full for first 6h, decays to 0.1 after 48h."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        from datetime import datetime, timezone, timedelta
+        agent = Agent()
+        # Entry was 2h ago → should be full conviction
+        entry_2h_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        r = agent.skills.invoke("conviction_decay", {"symbol": "ETHUSDT", "entry_time": entry_2h_ago, "thesis": "oversold bounce"})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertEqual(r["conviction_score"], 1.0)
+        # Entry was 60h ago → should be near 0.1
+        entry_60h_ago = (datetime.now(timezone.utc) - timedelta(hours=60)).isoformat()
+        r = agent.skills.invoke("conviction_decay", {"symbol": "ETHUSDT", "entry_time": entry_60h_ago, "thesis": "x"})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertLessEqual(r["conviction_score"], 0.2)
+        self.assertEqual(r["recommendation"], "exit_or_review")
+        print(f"  ✓ conviction_decay: 2h=1.0, 60h={r['conviction_score']:.2f} (recommendation: {r['recommendation']})")
+
+    def test_regime_detector_classifies(self):
+        """regime_detector: classify current market into one of 5 regimes."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        agent = Agent()
+        # Trending bull: candles going up
+        import time as t
+        candles = []
+        price = 100
+        for i in range(100):
+            o = price
+            c = price * 1.002
+            h = price * 1.005
+            l = price * 0.998
+            candles.append([t.time(), str(o), str(h), str(l), str(c), "1000"])
+            price = c
+        agent.skills._s_get_candles = MagicMock(return_value=candles)
+        r = agent.skills.invoke("regime_detector", {"symbol": "ETHUSDT"})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertIn(r["regime"], ["trending_bull", "trending_bear", "ranging", "high_vol_chaos", "low_vol_accumulation"])
+        self.assertIn("params_adjustment", r)
+        print(f"  ✓ regime_detector: classified as {r['regime']} (conf {r['confidence']})")
+
+    def test_false_breakout_detector(self):
+        """false_breakout_detector: detect below-avg-volume breakouts that mean-revert."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        agent = Agent()
+        # 25 prior candles around 100, then 5 recent that briefly break above but revert
+        prior = [[i, "99", "101", "98", "100", "1000"] for i in range(25)]
+        recent = [
+            [25, "101", "103", "101", "102", "500"],  # broke up but low volume
+            [26, "102", "102.5", "100", "100.5", "500"],
+            [27, "100.5", "101", "99", "99.5", "500"],
+            [28, "99.5", "100", "98", "98.5", "500"],
+            [29, "98.5", "99", "98", "98.2", "500"],  # current
+        ]
+        agent.skills._s_get_candles = MagicMock(return_value=prior + recent)
+        r = agent.skills.invoke("false_breakout_detector", {"symbol": "ETHUSDT"})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertTrue(r["ok"])
+        self.assertIn("is_false_breakout", r)
+        print(f"  ✓ false_breakout_detector: is_false={r['is_false_breakout']} (vol_ratio={r['volume_ratio']}, rec={r['recommendation']})")
+
+    def test_iceberg_order_splits(self):
+        """iceberg_order: split a large order into randomized children."""
+        from agent.core import Agent
+        agent = Agent()
+        wrapper = agent.skills.invoke("iceberg_order_builder", {"symbol": "ETHUSDT", "total_size_usd": 100, "num_children": 5})
+        r = wrapper.get("result", wrapper) if isinstance(wrapper, dict) else wrapper
+        self.assertTrue(r.get("ok"))
+        self.assertEqual(r.get("num_children"), 5)
+        total = sum(c["size_usd"] for c in r.get("child_orders", []))
+        self.assertAlmostEqual(total, 100, delta=0.5)
+        print(f"  ✓ iceberg_order: split $100 into 5 children (sizes: {[round(c['size_usd'], 1) for c in r['child_orders']]})")
+
+    def test_correlation_kill_switch_no_positions(self):
+        """correlation_kill_switch: returns 'ok' when fewer than 2 positions."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        agent = Agent()
+        agent.db.get_open_trades = MagicMock(return_value=[])
+        r = agent.skills.invoke("correlation_kill_switch", {"threshold": 0.8})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["open_positions"], 0)
+        self.assertFalse(r["is_kill_switch_active"])
+        print(f"  ✓ correlation_kill_switch: 0 positions → no kill switch")
+
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
