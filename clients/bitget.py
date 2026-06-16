@@ -51,10 +51,15 @@ class BitgetClient:
     # -------------------------------------------------------------------------
 
     def _sign(self, timestamp: str, method: str, request_path: str, body: str = "") -> str:
-        """Generate HMAC-SHA256 signature for Bitget API."""
+        """Generate HMAC-SHA256 signature for Bitget v2 API.
+
+        Bitget's API secret is delivered as a base64-encoded string. The HMAC
+        key is the SECRET itself (already the right format), NOT its decoded
+        bytes. Earlier version b64-decoded the secret again, which produced
+        a wrong key and every signed request was rejected with bad auth.
+        """
         message = timestamp + method.upper() + request_path + body
-        hmac_key = base64.b64decode(self.secret)
-        digest = hmac.new(hmac_key, message.encode("utf-8"), hashlib.sha256).digest()
+        digest = hmac.new(self.secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
         return base64.b64encode(digest).decode("utf-8")
 
     def _request(

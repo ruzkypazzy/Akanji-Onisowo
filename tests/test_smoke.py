@@ -656,6 +656,31 @@ class TestWATGreeting(unittest.TestCase):
         self.assertFalse(r["is_kill_switch_active"])
         print(f"  ✓ correlation_kill_switch: 0 positions → no kill switch")
 
+    def test_extract_trade_intent_basic(self):
+        """The prompt-bot parses free-form text into a trade intent."""
+        from agent.core import Agent
+        agent = Agent()
+        cases = [
+            ("buy 2 SOL", {"side": "buy", "symbol": "SOL", "amount_usd": 2.0}),
+            ("sell my BTC", {"side": "sell", "symbol": "BTC", "amount_usd": None}),
+            ("long ETH with $5", {"side": "buy", "symbol": "ETH", "amount_usd": 5.0}),
+            ("short 0.5 BTC", {"side": "sell", "symbol": "BTC", "amount_usd": 0.5}),
+            ("load up on SOL with 3 dollars", {"side": "buy", "symbol": "SOL", "amount_usd": 3.0}),
+            ("dump all my PEPE", {"side": "sell", "symbol": "PEPE", "amount_usd": None}),
+            ("what's the price of BTC?", None),  # not a trade
+            ("analyze SOL", None),  # not a trade (uses 'analyze' verb but no buy/sell)
+        ]
+        for text, expected in cases:
+            got = agent._extract_trade_intent(text)
+            if expected is None:
+                self.assertIsNone(got, f"Expected None for: {text!r}, got {got}")
+            else:
+                self.assertIsNotNone(got, f"Expected intent for: {text!r}, got None")
+                self.assertEqual(got["side"], expected["side"], f"side mismatch for {text!r}")
+                self.assertEqual(got["symbol"], expected["symbol"], f"symbol mismatch for {text!r}: got {got.get('symbol')}, expected {expected['symbol']}")
+                self.assertEqual(got.get("amount_usd"), expected["amount_usd"], f"amount mismatch for {text!r}: got {got.get('amount_usd')}, expected {expected['amount_usd']}")
+        print(f"  ✓ _extract_trade_intent: parsed {len(cases)} prompts correctly")
+
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)

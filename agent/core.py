@@ -1147,20 +1147,164 @@ class Agent:
             return f"❌ Reflection failed: {e}"
 
     def _cmd_ask(self, ctx: AgentContext) -> str:
-        """Free-form question. Let Qwen handle it with available skills."""
-        try:
-            # Build context
-            balance = self.bitget.get_account_balance("USDT")
-            portfolio = self.bitget.get_portfolio_value_usdt()
+        """Prompt bot: take any free-form text and act on it.
 
+        This is the user's primary interface. The bot:
+        1. Extracts a trade intent (if any): "buy 2 SOL", "sell all my BTC", etc.
+        2. For trade intents, runs the full perceive→advise→risk→execute→reflect flow.
+        3. For non-trade intents, treats the message as a question for Qwen.
+        4. Always shows the user what it understood before acting (safety net).
+        """
+        try:
+            text = (ctx.user_message or "").strip()
+            # Strip the leading /ask if present (Telegram sometimes routes /ask <text> here)
+            text = re.sub(r"^/ask\s*", "", text, flags=re.IGNORECASE).strip()
+            if not text:
+                return "🤖 Tell me what you want. Examples: `buy 2 dollars of SOL`, `sell my BTC`, `what's the SOL price?`, `analyze ETH`."
+
+            # 1. Detect trade intent via regex (fast, cheap)
+            intent = self._extract_trade_intent(text)
+
+            if intent:
+                # It's a trade — route through the appropriate flow
+                return self._execute_trade_intent(ctx, intent, text)
+
+            # 2. Not a trade — treat as a question for Qwen
+            return self._answer_question(ctx, text)
+        except Exception as e:
+            logger.exception(f"_cmd_ask failed: {e}")
+            return f"❌ Error processing your request: {e}"
+
+    def _extract_trade_intent(self, text: str) -> Optional[dict]:
+        """Extract a trade intent from free-form text.
+
+        Patterns recognized:
+        - "buy 2 SOL", "buy $2 of SOL", "buy 2 dollars worth of SOL"
+        - "sell my BTC", "sell all ETH", "sell 0.1 BTC"
+        - "long SOL", "short BTC"
+        - "trade ETH with 2 dollars"
+        - "open a position on SOL with 5 usdt"
+        Returns: {"side": "buy"|"sell", "symbol": str|None, "amount_usd": float|None, "raw": text}
+        """
+        t = text.lower()
+        # Must contain a buy/sell/long/short verb
+        if not re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b", t):
+            return None
+        # Determine side
+        side = None
+        if re.search(r"\b(buy|long|purchase|load|ape|enter|open)\b", t):
+            side = "buy"
+        elif re.search(r"\b(sell|short|dispose|dump|fade)\b", t):
+            side = "sell"
+        if not side:
+            return None
+        # Extract amount
+        amount_usd = None
+        # "buy 2 SOL", "buy 2 dollars of SOL"
+        m = re.search(r"(?:buy|sell|long|short|load|ape|dump|fade|enter|open)\s+\$?(\d+(?:\.\d+)?)\s*(?:dollars?|usdt|usdc|usd|of)?", t)
+        if m:
+            amount_usd = float(m.group(1))
+        # "buy $2 of SOL" (dollar sign first)
+        if amount_usd is None:
+            m = re.search(r"\$\s*(\d+(?:\.\d+)?)", t)
+            if m:
+                amount_usd = float(m.group(1))
+        # "with 2 dollars", "with $5"
+        if amount_usd is None:
+            m = re.search(r"with\s+\$?(\d+(?:\.\d+)?)\s*(?:dollars?|usdt|usdc|usd)?", t)
+            if m:
+                amount_usd = float(m.group(1))
+        # "for 2", "for $2"
+        if amount_usd is None:
+            m = re.search(r"for\s+\$?(\d+(?:\.\d+)?)", t)
+            if m:
+                amount_usd = float(m.group(1))
+        # Extract symbol. Prefer words AFTER the trade verb, so "I want to ape
+        # into SOL" picks SOL (not WANT).
+        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did"}
+        # Find substring after the trade verb
+        verb_match = re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b", t)
+        symbol = None
+        if verb_match:
+            after_verb = t[verb_match.end():]
+            for c in re.findall(r"\b([a-zA-Z]{2,8})\b", after_verb):
+                if c.lower() not in skip:
+                    symbol = c.upper()
+                    break
+        if symbol is None:
+            for c in re.findall(r"\b([a-zA-Z]{2,8})\b", text):
+                if c.lower() not in skip:
+                    symbol = c.upper()
+                    break
+        if not symbol:
+            return {"side": side, "symbol": None, "amount_usd": amount_usd, "raw": text}
+        return {"side": side, "symbol": symbol, "amount_usd": amount_usd, "raw": text}
+
+    def _execute_trade_intent(self, ctx: AgentContext, intent: dict, raw_text: str) -> str:
+        """Execute a trade intent. Always previews the plan first."""
+        side = intent["side"]
+        symbol = intent.get("symbol")
+        amount = intent.get("amount_usd")
+
+        # If missing symbol OR amount, show what we understood and ask for missing pieces
+        if not symbol and not amount:
+            return (
+                f"🤖 I think you want to *{side}*, but I need more info:\n"
+                f"  • Which token? (e.g. SOL, BTC, ETH)\n"
+                f"  • How much? (e.g. `$2`, `5 dollars`)\n\n"
+                f"Try: `/{side} SYMBOL USDT_AMOUNT`\n"
+                f"Or: `{side} 2 SOL`"
+            )
+        if not symbol:
+            return (
+                f"🤖 Got the {side} for `${amount}`. Which token?\n"
+                f"Reply like: `SOL` or `BTCUSDT`"
+            )
+        if not amount:
+            # Default to $1 if no amount specified (safe fallback)
+            amount = 1.0
+            msg = f"🤖 I'll {side} `${amount:.2f}` of {symbol} (default size; specify an amount to change). Confirm?\n"
+            msg += f"  → `/{side} {symbol} {amount}`"
+            return msg
+
+        # We have everything. Show the plan, then run the full flow.
+        return self._handle_trade_prompt(ctx, side=side, symbol=symbol, amount_usd=amount)
+
+    def _handle_trade_prompt(self, ctx: AgentContext, side: str, symbol: str, amount_usd: float) -> str:
+        """Full flow for a trade-from-prompt: normalize symbol, risk check, place order.
+
+        If the trade is large enough to warrant advisor review, use the semi-autonomous
+        flow (cache the analysis, ask /proceed). Otherwise, place the order directly.
+        """
+        try:
+            if not symbol.endswith("USDT"):
+                symbol = symbol + "USDT"
+            # Build a fake AgentContext for _handle_trade
+            fake_ctx = AgentContext(
+                user_id=ctx.user_id,
+                user_message=f"/{side} {symbol} {amount_usd}",
+                command=side,
+                args={"symbol": symbol, "amount_usd": amount_usd},
+            )
+            return self._handle_trade(fake_ctx, side=side)
+        except Exception as e:
+            logger.exception(f"_handle_trade_prompt failed: {e}")
+            return f"❌ Couldn't execute the trade: {e}"
+
+    def _answer_question(self, ctx: AgentContext, text: str) -> str:
+        """Answer a free-form question using Qwen + skills."""
+        try:
+            balance = self.bitget.get_account_balance("USDT")
+            try:
+                portfolio = self.bitget.get_portfolio_value_usdt()
+            except Exception:
+                portfolio = balance
             context_msg = (
                 f"Current context:\n"
                 f"- USDT balance: ${balance:.2f}\n"
                 f"- Portfolio value: ${portfolio:.2f}\n"
-                f"- User said: {ctx.user_message}\n"
+                f"- User said: {text}\n"
             )
-
-            # Use Qwen to interpret
             skills_descriptions = self.skills.get_skill_descriptions()
             tools = self.skills.get_tool_schemas()
 
@@ -1173,9 +1317,7 @@ class Agent:
                 tools=tools if tools else None,
             )
 
-            # If Qwen wants to call a tool, do it
             if resp.get("tool_calls"):
-                # Process the first tool call
                 tool_call = resp["tool_calls"][0]
                 skill_name = tool_call["function"]["name"]
                 skill_args_str = tool_call["function"]["arguments"]
@@ -1183,24 +1325,22 @@ class Agent:
                     skill_args = json.loads(skill_args_str)
                 except Exception:
                     skill_args = {}
-
                 result = self.skills.invoke(skill_name, skill_args)
-
-                # Get Qwen's final answer with the tool result
                 followup = self.qwen.chat(
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": ctx.user_message},
+                        {"role": "user", "content": text},
                         {"role": "assistant", "content": resp["content"] or "(invoking skill)"},
                         {"role": "tool", "tool_call_id": tool_call.get("id", "1"), "name": skill_name, "content": json.dumps(result)},
                     ],
                     max_tokens=1000,
                 )
-                return followup["content"]
+                return followup["content"] or "Done."
 
-            return resp["content"] or "🤔 I understood, but I'm not sure what to do. Try `/help` for commands."
+            return resp["content"] or "🤔 I'm not sure what to do. Try `/help` for commands."
         except Exception as e:
-            logger.exception(f"_cmd_ask failed: {e}")
+            logger.exception(f"_answer_question failed: {e}")
+            return f"❌ Couldn't answer: {e}"
             return f"❌ I couldn't process that: {e}"
 
     # -------------------------------------------------------------------------
