@@ -659,7 +659,14 @@ class TestWATGreeting(unittest.TestCase):
     def test_extract_trade_intent_basic(self):
         """The prompt-bot parses free-form text into a trade intent."""
         from agent.core import Agent
+        from unittest.mock import MagicMock
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
         agent = Agent()
+        agent.bitget = MagicMock()
+        agent.qwen = MagicMock()
         cases = [
             ("buy 2 SOL", {"side": "buy", "symbol": "SOL", "amount_usd": 2.0}),
             ("sell my BTC", {"side": "sell", "symbol": "BTC", "amount_usd": None}),
@@ -681,6 +688,71 @@ class TestWATGreeting(unittest.TestCase):
                 self.assertEqual(got.get("amount_usd"), expected["amount_usd"], f"amount mismatch for {text!r}: got {got.get('amount_usd')}, expected {expected['amount_usd']}")
         print(f"  ✓ _extract_trade_intent: parsed {len(cases)} prompts correctly")
 
+    def test_memory_recall_returns_relevant(self):
+        """memory_recall: returns matches ordered by relevance."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        # Stub the bitget client before Agent() constructs it
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
+        agent = Agent()
+        agent.bitget = MagicMock()
+        agent.qwen = MagicMock()
+        # Seed memories
+        agent.db.add_memory("observation", "Bought SOLUSDT at $150 with 2% target", importance=7)
+        agent.db.add_memory("observation", "Bought BTCUSDT at $65000 with target $70000", importance=7)
+        agent.db.add_memory("observation", "User asked about Ethereum gas fees", importance=3)
+        r = agent.skills.invoke("memory_recall", {"query": "what did I trade on solana?", "limit": 3})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertGreater(len(r["matches"]), 0, "memory_recall should return at least one match")
+        # The SOL memory should rank above the Ethereum memory
+        first = r["matches"][0]["content"]
+        self.assertIn("SOL", first, f"Top match should be the SOL one, got: {first}")
+        self.assertIn("context", r)
+        self.assertNotIn("no memories", r["context"])
+        print(f"  ✓ memory_recall: '{r['query']}' → {len(r['matches'])} matches, top='{first[:50]}...'")
+
+    def test_find_best_trade_rejects_hallucinated_symbol(self):
+        """find_best_trade: if Qwen invents a symbol, the skill rejects it."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock, patch
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
+        agent = Agent()
+        agent.bitget = MagicMock()
+        # Mock universe scan to return real symbols only
+        def fake_universe_scan(limit=50):
+            return {
+                "ok": True,
+                "candidates": [
+                    {"symbol": "BTCUSDT", "last_price": 65000, "change_24h_pct": 0.5, "volume_24h_usd": 100_000_000},
+                    {"symbol": "SOLUSDT", "last_price": 150, "change_24h_pct": 1.2, "volume_24h_usd": 50_000_000},
+                    {"symbol": "ETHUSDT", "last_price": 3000, "change_24h_pct": 0.3, "volume_24h_usd": 80_000_000},
+                ]
+            }
+        # Mock score_symbol to return a normal score
+        def fake_score_symbol(symbol):
+            return {"ok": True, "composite": 0.65, "sub_scores": {"rsi": 0.5}, "signals": {}}
+        # Mock Qwen to hallucinate a fake symbol
+        agent.qwen = MagicMock()
+        agent.qwen.chat = MagicMock(return_value={"content": "pick: FAKEUSDT\nconfidence: 0.9\nreasoning: hallucinated"})
+        # Replace the qwen reference inside the skills registry too
+        agent.skills.qwen = agent.qwen
+
+        # Patch the methods
+        agent.skills._s_universe_scan = fake_universe_scan
+        agent.skills._s_score_symbol = fake_score_symbol
+
+        r = agent.skills.invoke("find_best_trade", {"amount_usd": 2, "max_candidates": 5})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        # The hallucinated pick should be replaced with SKIP
+        self.assertEqual(r["qwen_pick"], "SKIP", f"Expected SKIP for hallucinated symbol, got {r.get('qwen_pick')}")
+        self.assertIn("Rejected", r.get("qwen_reasoning", ""))
+        print(f"  ✓ find_best_trade: rejected hallucinated symbol FAKEUSDT → SKIP")
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)

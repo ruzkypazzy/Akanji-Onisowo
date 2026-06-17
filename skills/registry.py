@@ -17,6 +17,7 @@ The registry exposes:
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
@@ -1242,13 +1243,24 @@ class SkillsRegistry:
                     continue
                 if any(lever in base for lever in ["UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S"]):
                     continue
+                # Filter out Bitget R-prefix leveraged stock tokens
+                # (RSPCX, RMU, RQQQ, RSPY, RNVDA, RUS2000, RTesla, RApple, etc.)
+                if base.startswith("R") and len(base) >= 3 and base[1].isupper():
+                    continue
+                # Filter out known stock/forex/commodity tokens
+                if any(forex in base for forex in ["EUR", "GBP", "JPY", "AUD"]):
+                    continue
                 # Filter out very illiquid
                 quote_vol = float(t.get("quoteVolume", 0) or 0)
                 if quote_vol < 1_000_000:  # <$1M 24h
                     continue
+                # Filter out absurd price ranges (likely mispriced or prelaunch)
+                last_price = float(t.get("lastPr", 0) or 0)
+                if last_price <= 0 or last_price > 1_000_000:
+                    continue
                 candidates.append({
                     "symbol": sym,
-                    "last_price": float(t.get("lastPr", 0) or 0),
+                    "last_price": last_price,
                     "change_24h_pct": float(t.get("change24h", 0) or 0),
                     "volume_24h_usd": quote_vol,
                 })
@@ -1276,15 +1288,17 @@ class SkillsRegistry:
 
             # 1. RSI
             r = self._s_rsi(symbol=symbol)
-            rsi = float(r.get("rsi", 50))
-            # For long: oversold (low RSI) is bullish
+            rsi = float(r.get("rsi", 50)) if r.get("ok") else 50.0
             signals["rsi"] = rsi
+            signals["rsi_real"] = r.get("ok", False)
+            # For long: oversold (low RSI) is bullish
             sub_scores["rsi"] = 1.0 - (abs(rsi - 30) / 30) if rsi <= 60 else max(0, 1.0 - (rsi - 60) / 40)
 
             # 2. MACD
             m = self._s_macd(symbol=symbol)
-            macd_hist = float(m.get("histogram", 0))
+            macd_hist = float(m.get("histogram", 0)) if m.get("ok") else 0.0
             signals["macd_hist"] = macd_hist
+            signals["macd_real"] = m.get("ok", False)
             # Bullish if histogram > 0
             sub_scores["macd"] = 0.7 if macd_hist > 0 else 0.3
 
@@ -1557,9 +1571,18 @@ class SkillsRegistry:
             except Exception as e:
                 qwen_reasoning = f"(Qwen synthesis unavailable: {e})"
 
-            # If Qwen picked a symbol, get its TP/SL suggestion
+            # CRITICAL: validate Qwen's pick against the actual top_n list.
+            # Never trust a symbol that wasn't in the universe scan.
+            valid_symbols = {r["symbol"] for r in top_n}
+            if qwen_pick and qwen_pick != "SKIP" and qwen_pick not in valid_symbols:
+                # Qwen hallucinated a symbol that wasn't in the list. Reject it.
+                qwen_reasoning += f" [Rejected: {qwen_pick} is not in the live universe scan.]"
+                qwen_pick = "SKIP"
+                qwen_conf = 0.0
+
+            # If Qwen picked a real symbol, get its TP/SL suggestion
             suggested_tp_sl = None
-            if qwen_pick and qwen_pick != "SKIP" and qwen_pick.endswith("USDT"):
+            if qwen_pick and qwen_pick != "SKIP" and qwen_pick.endswith("USDT") and qwen_pick in valid_symbols:
                 try:
                     suggested_tp_sl = self._s_suggest_tp_sl(symbol=qwen_pick, side="buy")
                 except Exception:
@@ -1771,11 +1794,92 @@ class SkillsRegistry:
         self.db.add_memory("observation", entry.get("content", ""), tags=entry.get("tags", []), importance=entry.get("importance", 5))
         return {"ok": True}
 
-    def _s_memory_recall(self, query: str, limit: int = 10) -> dict:
-        # Simple substring match
-        all_mems = self.db.get_memories(limit=100)
-        matched = [m for m in all_mems if query.lower() in m["content"].lower()][:limit]
-        return {"query": query, "matches": [{"content": m["content"], "category": m["category"]} for m in matched]}
+    def _s_memory_recall(self, query: str, limit: int = 10, user_id: int = None) -> dict:
+        """Recall memories relevant to a query.
+
+        Strategy:
+        1. Pull the last 100 memories (any user)
+        2. Score each by: keyword overlap (case-insensitive) + recency + importance
+        3. Return top N as a formatted context string
+        """
+        import time as _t
+        all_mems = self.db.get_memories(limit=200) if hasattr(self.db, "get_memories") else []
+        if not all_mems:
+            return {"query": query, "matches": [], "context": "(no memories stored yet)"}
+
+        # Tokenize the query (lowercase alphanumeric words 3+ chars)
+        q_tokens = set(w.lower() for w in re.findall(r"\b[a-zA-Z0-9]{3,}\b", query))
+        if not q_tokens:
+            q_tokens = set(w.lower() for w in re.findall(r"\b[a-zA-Z0-9]{2,}\b", query))
+
+        # Normalize tickers: BTCUSDT, BTC-USDT, BTC/USDT, etc → btc
+        def _normalize_for_match(text):
+            cleaned = re.sub(r"usdt|usd|/|-|\?", " ", text.lower())
+            return re.findall(r"[a-z0-9]+", cleaned)
+
+        q_norm = set(_normalize_for_match(query))
+
+        # Helper: fuzzy match a query token to a memory token (substring or 3+ char prefix)
+        def _fuzzy_token_match(q_tok, c_tokens):
+            if q_tok in c_tokens:
+                return True
+            for c_tok in c_tokens:
+                if len(q_tok) >= 4 and len(c_tok) >= 3:
+                    if q_tok.startswith(c_tok[:3]) or c_tok.startswith(q_tok[:3]):
+                        return True
+            return False
+
+        # Score each memory
+        scored = []
+        now = _t.time()
+        for m in all_mems:
+            content = m.get("content", "")
+            c_tokens = set(w.lower() for w in re.findall(r"\b[a-zA-Z0-9]{3,}\b", content))
+            c_norm = set(_normalize_for_match(content))
+            # Keyword overlap (raw)
+            overlap = len(q_tokens & c_tokens)
+            # Normalized overlap (e.g. 'solana' → 'sol' matches 'solusdt' → 'sol')
+            norm_overlap = len(q_norm & c_norm)
+            # Fuzzy token match (e.g. 'solana' starts with 'sol' which is in c_norm)
+            fuzzy_matches = sum(1 for qt in q_tokens if _fuzzy_token_match(qt, c_norm))
+            # Substring match (case-insensitive)
+            substring_match = query.lower() in content.lower() or any(
+                tok in content.lower() for tok in q_tokens if len(tok) >= 4
+            )
+            if overlap == 0 and norm_overlap == 0 and fuzzy_matches == 0 and not substring_match:
+                continue
+            # Recency: 0-1 bonus, newer = higher
+            try:
+                created = m.get("created_at", "")
+                # SQLite default format: 'YYYY-MM-DD HH:MM:SS'
+                if created:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                    age_hours = (datetime.utcnow() - dt).total_seconds() / 3600
+                    recency = max(0, 1 - age_hours / 168)  # decay over a week
+                else:
+                    recency = 0.5
+            except Exception:
+                recency = 0.5
+            importance = float(m.get("importance", 5)) / 10.0
+            # Score: weighted combination
+            score = overlap * 2 + norm_overlap * 1.5 + fuzzy_matches * 1.2 + recency + importance
+            if substring_match and overlap == 0 and norm_overlap == 0 and fuzzy_matches == 0:
+                score += 0.5  # small bonus for substring-only match
+            scored.append((score, m))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:limit]
+        matches = [{"content": m["content"], "category": m.get("category", ""), "importance": m.get("importance", 0)} for _, m in top]
+        # Build a human-readable context block
+        if matches:
+            context_lines = ["[Memory context relevant to this query:]"]
+            for i, m in enumerate(matches, 1):
+                context_lines.append(f"  {i}. ({m['category']}) {m['content'][:200]}")
+            context = "\n".join(context_lines)
+        else:
+            context = "(no memories matched the query)"
+        return {"query": query, "matches": matches, "context": context}
 
     def _s_memory_store(self, category: str, content: str, importance: int = 5) -> dict:
         mem_id = self.db.add_memory(category, content, importance=importance)

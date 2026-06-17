@@ -744,6 +744,20 @@ class Agent:
             if not result.get("ok"):
                 return f"❌ Autonomous scan failed: {result.get('error', 'unknown')}"
 
+            # Journal this scan so the user can ask about it later
+            try:
+                ranked = result.get("ranked", [])
+                top_str = ", ".join(f"{r['symbol']}@{r['composite']:.2f}" for r in ranked[:5])
+                self.db.add_memory(
+                    "scan",
+                    f"Autonomous scan for ${amount_usd:.2f}: Qwen picked {result.get('qwen_pick', 'SKIP')} "
+                    f"(conf {result.get('qwen_confidence', 0):.2f}). Top: {top_str}",
+                    tags=["autotrade", "scan"],
+                    importance=6,
+                )
+            except Exception:
+                pass
+
             qwen_pick = result.get("qwen_pick")
             qwen_conf = result.get("qwen_confidence", 0)
             suggested = result.get("suggested_tp_sl") or {}
@@ -1365,7 +1379,7 @@ class Agent:
                 amount_usd = float(m.group(1))
         # Extract symbol. Prefer words AFTER the trade verb, so "I want to ape
         # into SOL" picks SOL (not WANT).
-        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did"}
+        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did", "up", "down", "out", "off", "more", "less", "bit", "little", "much", "many", "few", "lot", "just", "now", "then", "soon", "today", "tomorrow", "yesterday", "good", "bad", "big", "small", "high", "low", "right", "wrong", "best", "worst"}
         # Find substring after the trade verb
         verb_match = re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b", t)
         symbol = None
@@ -1452,9 +1466,20 @@ class Agent:
             skills_descriptions = self.skills.get_skill_descriptions()
             tools = self.skills.get_tool_schemas()
 
+            # Auto-recall relevant memories from the journal and inject them
+            # into the system prompt so Qwen has continuity across turns.
+            try:
+                mem_result = self.skills.invoke("memory_recall", {"query": text, "limit": 5, "user_id": ctx.user_id})
+                mem_context = mem_result.get("result", mem_result).get("context", "")
+            except Exception:
+                mem_context = ""
+            full_system = SYSTEM_PROMPT
+            if mem_context and "(no memories" not in mem_context:
+                full_system = SYSTEM_PROMPT + "\n\n" + mem_context
+
             resp = self.qwen.chat(
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT + "\n\nAvailable skills:\n" + skills_descriptions},
+                    {"role": "system", "content": full_system + "\n\nAvailable skills:\n" + skills_descriptions},
                     {"role": "user", "content": context_msg},
                 ],
                 max_tokens=1500,
@@ -1480,6 +1505,20 @@ class Agent:
                     max_tokens=1000,
                 )
                 return followup["content"] or "Done."
+
+            # Remember this exchange so the bot has continuity next time
+            try:
+                bot_says = resp["content"] or ""
+                # Keep only first 400 chars to avoid bloat
+                summary = bot_says[:400].replace("\n", " ")
+                self.db.add_memory(
+                    "conversation",
+                    f"User asked: '{text[:200]}'. I replied: '{summary}'",
+                    tags=["chat"],
+                    importance=3,
+                )
+            except Exception:
+                pass
 
             return resp["content"] or "🤔 I'm not sure what to do. Try `/help` for commands."
         except Exception as e:
