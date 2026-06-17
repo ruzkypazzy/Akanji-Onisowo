@@ -754,6 +754,60 @@ class TestWATGreeting(unittest.TestCase):
         self.assertIn("Rejected", r.get("qwen_reasoning", ""))
         print(f"  ✓ find_best_trade: rejected hallucinated symbol FAKEUSDT → SKIP")
 
+    def test_universe_scan_excludes_stock_tokens(self):
+        """universe_scan: must filter out Bitget R-prefix stock tokens (R-prefix + all-uppercase)."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
+        agent = Agent()
+        # Mock the bitget client to return a mix of real crypto + Bitget stock tokens
+        agent.bitget = MagicMock()
+        agent.bitget.get_all_tickers = MagicMock(return_value=[
+            # Bitget R-prefix stock tokens (must be filtered by R-prefix rule)
+            {"symbol": "RFUSDT", "lastPr": "100", "quoteVolume": "500000000", "change24h": "0.1"},
+            {"symbol": "RBUSDT", "lastPr": "200", "quoteVolume": "200000000", "change24h": "0.0"},
+            {"symbol": "RVUSDT", "lastPr": "300", "quoteVolume": "100000000", "change24h": "0.0"},
+            {"symbol": "RSPCXUSDT", "lastPr": "200", "quoteVolume": "60000000000", "change24h": "0.0"},
+            {"symbol": "RSPYUSDT", "lastPr": "500", "quoteVolume": "50000000000", "change24h": "0.0"},
+            {"symbol": "RNVDAUSDT", "lastPr": "200", "quoteVolume": "25000000000", "change24h": "0.0"},
+            # Tokenized stocks with ON suffix (must be filtered)
+            {"symbol": "AAPLONUSDT", "lastPr": "200", "quoteVolume": "10000000", "change24h": "0.0"},
+            {"symbol": "MSFTONUSDT", "lastPr": "400", "quoteVolume": "10000000", "change24h": "0.0"},
+            # Long all-uppercase stock token (must be filtered by 6+ char rule)
+            {"symbol": "PRESPCXUSDT", "lastPr": "200", "quoteVolume": "10000000", "change24h": "0.0"},
+            # Stables (must be filtered)
+            {"symbol": "USDCUSDT", "lastPr": "1.0", "quoteVolume": "1000000", "change24h": "0.0"},
+            {"symbol": "DAIUSDT", "lastPr": "1.0", "quoteVolume": "1000000", "change24h": "0.0"},
+            # Short all-uppercase unknown ticker (not in _KNOWN_SHORT_CRYPTO, must be filtered)
+            {"symbol": "XYZXUSDT", "lastPr": "10", "quoteVolume": "5000000", "change24h": "0.0"},
+            {"symbol": "ABCUSDT", "lastPr": "10", "quoteVolume": "5000000", "change24h": "0.0"},
+        ])
+        # Use a restrictive whitelist to avoid CoinGecko's noise
+        from skills.registry import SkillsRegistry
+        SkillsRegistry._CRYPTO_WHITELIST_CACHE = None
+        SkillsRegistry._CRYPTO_WHITELIST_TS = 0
+        agent.skills._crypto_whitelist = lambda: set()  # empty whitelist
+        r = agent.skills.invoke("universe_scan", {"limit": 50})
+        r = r.get("result", r) if isinstance(r, dict) else r
+        self.assertTrue(r.get("ok"))
+        symbols = [c["symbol"] for c in r.get("candidates", [])]
+        # All R-prefix stock tokens must NOT be in the list
+        for stock in ["RFUSDT", "RBUSDT", "RVUSDT", "RSPCXUSDT", "RSPYUSDT", "RNVDAUSDT"]:
+            self.assertNotIn(stock, symbols, f"Stock token {stock} must be filtered out")
+        # All tokenized stocks must NOT be in the list
+        for stock in ["AAPLONUSDT", "MSFTONUSDT", "PRESPCXUSDT"]:
+            self.assertNotIn(stock, symbols, f"Stock token {stock} must be filtered out")
+        # Stables must not be in the list
+        for stable in ["USDCUSDT", "DAIUSDT"]:
+            self.assertNotIn(stable, symbols, f"Stable {stable} must be filtered out")
+        # Unknown short all-uppercase tickers must not pass
+        for unknown in ["XYZXUSDT", "ABCUSDT"]:
+            self.assertNotIn(unknown, symbols, f"Unknown short ticker {unknown} must be filtered out")
+        print(f"  ✓ universe_scan: filtered all R-prefix stocks, ON-suffix stocks, long uppercase stocks, stables, unknown short tickers (candidates: {symbols})")
+
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("  Ọniṣọwọ́ — Smoke tests")

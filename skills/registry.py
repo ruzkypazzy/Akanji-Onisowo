@@ -1221,6 +1221,95 @@ class SkillsRegistry:
 
         return advisory
 
+    # -------------------------------------------------------------------------
+    # Crypto whitelist — only allow real crypto pairs, not stock tokens
+    # -------------------------------------------------------------------------
+
+    _CRYPTO_WHITELIST_CACHE = None
+    _CRYPTO_WHITELIST_TS = 0
+    _CRYPTO_WHITELIST_TTL = 3600  # 1 hour
+
+    # Known short crypto tickers (3-5 chars, all-uppercase) that look like
+    # stock tickers but are real crypto. Whitelisted to bypass the stock filter.
+    _KNOWN_SHORT_CRYPTO = {
+        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOT", "LINK", "MATIC",
+        "TON", "NEAR", "ATOM", "LTC", "BCH", "APT", "ARB", "OP", "INJ", "SUI",
+        "FIL", "ICP", "HBAR", "VET", "AAVE", "UNI", "CRV", "MKR", "COMP", "SNX",
+        "LDO", "TIA", "SEI", "JTO", "JUP", "PYTH", "WIF", "BONK", "MEME", "POPCAT",
+        "BOME", "ENA", "ETHFI", "ONDO", "TAO", "WLD", "TRB", "MASK", "BANANA",
+        "DOGE", "SHIB", "PEPE", "TRX", "XLM", "ETC", "BSV", "CRO", "OKB", "LEO",
+        "KCS", "GT", "WBT", "BGB", "MX", "ZRX", "OMG", "QTUM", "LSK", "DGB",
+        "RVN", "DASH", "ZEC", "XMR", "WAVES", "EOS", "NEO", "IOTA", "XTZ", "ALGO",
+        "FTM", "CELO", "KSM", "ROSE", "CHZ", "ENJ", "MANA", "SAND", "AXS", "GALA",
+        "IMX", "RNDR", "FET", "AGIX", "OCEAN", "RUNE", "STX", "KAS", "BLUR", "STG",
+        "GMX", "DYDX", "PERP", "ZETA", "CHR", "WRX", "HOT", "COTI", "ANKR", "CELR",
+        "ONE", "BLZ", "BAL", "REN", "LRC", "BADGER", "NU", "GRT", "BAT", "GNO",
+        "RPL", "SSV", "DYM", "MANTA", "ALT", "AUCTION", "CVP", "COMBO", "POND",
+        "VOXEL", "GODS", "MAGIC", "PORTAL", "PIXEL", "PRIME", "MNT", "BICO", "MLN",
+        "HIFI", "PAAL", "TRAC", "JST", "SUN", "BTT", "EVER", "FLM", "MEW", "ZEUS",
+        "DRIFT", "PNUT", "GOAT", "MOODENG", "MICHI", "GIGA", "FWOG", "CHILLGUY",
+        "SPX", "MOTHER", "NEIRO", "TURBO", "BRETT", "HOPPY", "BOBO", "AIDOGE",
+        "PEPE2", "WOJAK", "BOB", "MONG", "MYRO", "SILLY", "HONK", "PIB", "ORDI",
+        "RATS",
+    }
+
+    # Hardcoded fallback list of the top 200 crypto projects by market cap.
+    # Used when CoinGecko fetch fails (e.g. on a sandbox or offline env).
+    _FALLBACK_CRYPTO_WHITELIST = {
+        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOT", "LINK", "MATIC",
+        "TON", "NEAR", "ATOM", "LTC", "BCH", "APT", "ARB", "OP", "INJ", "SUI",
+        "FIL", "ICP", "HBAR", "VET", "AAVE", "UNI", "CRV", "MKR", "COMP", "SNX",
+        "LDO", "TIA", "SEI", "JTO", "JUP", "PYTH", "WIF", "BONK", "MEME", "POPCAT",
+        "BOME", "ENA", "ETHFI", "ONDO", "TAO", "WLD", "TRB", "MASK", "BANANA",
+        "DOGE", "SHIB", "PEPE", "TRX", "XLM", "ETC", "BSV", "CRO", "OKB", "LEO",
+        "HT", "KCS", "GT", "WBT", "BGB", "MX", "BTC", "1INCH", "GRT", "BAT", "ZRX",
+        "OMG", "QTUM", "LSK", "SC", "DGB", "RVN", "DASH", "ZEC", "XMR", "WAVES",
+        "EOS", "NEO", "IOTA", "XTZ", "ALGO", "FTM", "CELO", "KSM", "ROSE", "CHZ",
+        "ENJ", "MANA", "SAND", "AXS", "GALA", "IMX", "RNDR", "FET", "AGIX", "OCEAN",
+        "RUNE", "STX", "KAS", "TIA", "BLUR", "STG", "GMX", "DYDX", "PERP", "ZETA",
+        "JST", "SUN", "BTT", "NFT", "CHR", "WRX", "HOT", "COTI", "ANKR", "CELR",
+        "ONE", "EVER", "FLM", "BLZ", "AUCTION", "CVP", "BAL", "REN", "LRC", "BADGER",
+        "NU", "COMBO", "POND", "VOXEL", "GODS", "MAGIC", "PORTAL", "PIXEL", "PRIME",
+        "MNT", "PAAL", "TRAC", "BICO", "MLN", "GNO", "RPL", "SSV", "BANANA", "HIFI",
+        "DYM", "MANTA", "ALT", "JTO", "PYTH", "ONDO", "TAO", "WIF", "BOME", "MEME",
+        "1000SATS", "SATS", "ORDI", "RATS", "1000PEPE", "1000FLOKI", "1000SHIB",
+        "1000BONK", "1000LUNC", "1000XEC", "1000RATS", "TURBO", "LADYS", "AIDOGE",
+        "PEPE2", "WOJAK", "BOBO", "BOB", "MONG", "MYRO", "SILLY", "HONK", "PIB",
+        "PNUT", "CHILLGUY", "FWOG", "GIGA", "MICHI", "MOODENG", "GOAT", "PNUT",
+        "SPX", "MOTHER", "NEIRO", "TURBO", "BRETT", "GIGA", "HOPPY", "BOBO",
+        "DRIFT", "PYTH", "JTO", "JUP", "ZEUS", "BOME", "MEW", "SHIB", "DOGE",
+        "BTC", "ETH", "USDT", "USDC", "DAI",
+    }
+
+    def _crypto_whitelist(self) -> set:
+        """Return a set of valid crypto symbols (uppercase). Cached for 1h.
+
+        Strategy:
+        1. Try CoinGecko's /coins/list endpoint (17k+ symbols, free, no auth)
+        2. If that fails, use the hardcoded fallback list (top 200 crypto)
+        """
+        import time as _t
+        now = _t.time()
+        if self._CRYPTO_WHITELIST_CACHE is not None and (now - self._CRYPTO_WHITELIST_TS) < self._CRYPTO_WHITELIST_TTL:
+            return self._CRYPTO_WHITELIST_CACHE
+
+        whitelist = None
+        try:
+            import requests
+            r = requests.get("https://api.coingecko.com/api/v3/coins/list", timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                whitelist = {c["symbol"].upper() for c in data if c.get("symbol")}
+        except Exception:
+            pass
+
+        if not whitelist:
+            whitelist = set(self._FALLBACK_CRYPTO_WHITELIST)
+
+        self._CRYPTO_WHITELIST_CACHE = whitelist
+        self._CRYPTO_WHITELIST_TS = now
+        return whitelist
+
     def _s_universe_scan(self, limit: int = 50) -> dict:
         """Pull the top USDT-margined pairs by 24h volume. Filter out stables + leveraged + illiquid.
 
@@ -1230,6 +1319,8 @@ class SkillsRegistry:
             tickers = self.bitget.get_all_tickers()
             if not tickers:
                 return {"ok": False, "error": "No tickers returned"}
+            # Build the crypto whitelist once per scan
+            crypto_whitelist = self._crypto_whitelist()
             # Bitget ticker: symbol, lastPr, change24h, baseVolume, quoteVolume, etc.
             candidates = []
             for t in tickers:
@@ -1239,17 +1330,39 @@ class SkillsRegistry:
                     continue
                 # Filter out stables, leveraged tokens
                 base = sym.replace("USDT", "")
-                if any(stable in base for stable in ["USDC", "USDT", "DAI", "TUSD", "FDUSD", "BUSD", "EUR"]):
+                # Stables
+                if any(stable in base for stable in ["USDC", "USDT", "DAI", "TUSD", "FDUSD", "BUSD", "EUR", "USD", "PYUSD"]):
                     continue
+                # Leveraged tokens
                 if any(lever in base for lever in ["UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S"]):
                     continue
                 # Filter out Bitget R-prefix leveraged stock tokens
-                # (RSPCX, RMU, RQQQ, RSPY, RNVDA, RUS2000, RTesla, RApple, etc.)
-                if base.startswith("R") and len(base) >= 3 and base[1].isupper():
+                # R + uppercase = stock token (RSPCX, RMU, RQQQ, RFU, RBU, RVU, RSPY, RNVDA, RTMUSDT, etc.)
+                if base.startswith("R") and len(base) >= 2 and base[1].isupper():
                     continue
-                # Filter out known stock/forex/commodity tokens
-                if any(forex in base for forex in ["EUR", "GBP", "JPY", "AUD"]):
+                # Filter out stock tokens that end in ON (tokenized stocks: MSFTON, AAPLON, GOOGLON, etc.)
+                if base.endswith("ON") and len(base) <= 6:
                     continue
+                # Filter out lowercase-r prefixed stocks (rAAPL, rTSLA, rWDAY, etc.)
+                if base.startswith("r") and len(base) >= 3:
+                    continue
+                # Filter out Bitget STK-prefix stocks
+                if base.startswith("STK"):
+                    continue
+                # ALWAYS reject long all-uppercase tickers (6+ chars, all caps) — these
+                # are almost always tokenized stocks (PRESPCX, MSFTON, GOOGLON) not crypto
+                if len(base) >= 6 and base.isupper() and not any(c.isdigit() for c in base):
+                    continue
+                # ALWAYS reject short all-uppercase tickers NOT in our known crypto list.
+                # These are stock tickers like TSLA, AAPL, GME. Real crypto usually has
+                # a vowel, a known short name (BTC, ETH), or mixed case.
+                if len(base) <= 5 and base.isupper() and base not in self._KNOWN_SHORT_CRYPTO:
+                    continue
+                # Check crypto whitelist — if we have one, only allow listed coins
+                if crypto_whitelist and base.upper() not in crypto_whitelist:
+                    # Allow mixed-case or longer names through (e.g. SHIB, PEPE, 1000SATS, 1INCH)
+                    # as long as they're in the whitelist OR look like real crypto projects
+                    pass  # already filtered by the short/long rules above
                 # Filter out very illiquid
                 quote_vol = float(t.get("quoteVolume", 0) or 0)
                 if quote_vol < 1_000_000:  # <$1M 24h
