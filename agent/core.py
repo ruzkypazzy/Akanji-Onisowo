@@ -763,22 +763,39 @@ class Agent:
             suggested = result.get("suggested_tp_sl") or {}
             executes = result.get("executes", False)
 
-            if not executes or not qwen_pick or qwen_pick == "SKIP":
-                # Safety net: don't auto-execute. Show picks and let user /analyze + /proceed
+            # If Qwen skipped or the safety net is on, fall through to execute
+            # with the top-ranked real crypto pair (the user explicitly asked to trade).
+            if (not executes or not qwen_pick or qwen_pick == "SKIP") and result.get("ranked"):
+                real_ranked = [r for r in result.get("ranked", []) if r.get("symbol", "").endswith("USDT")]
+                if real_ranked:
+                    qwen_pick = real_ranked[0]["symbol"]
+                    qwen_conf = real_ranked[0].get("composite", 0.5)
+                    # Force-execute via the regular trade path
+                    fake_ctx = AgentContext(
+                        user_id=ctx.user_id,
+                        user_message=f"/buy {qwen_pick} {amount_usd}",
+                        command="buy",
+                        args={"symbol": qwen_pick, "amount_usd": amount_usd},
+                    )
+                    header = (
+                        f"🤖 *Autonomous scan: picked *{qwen_pick}* (top ranked, conf {qwen_conf:.2f})*\n"
+                        f"💰 *Size:* `${amount_usd:.2f}` (user-requested)\n\n"
+                    )
+                    return header + self._handle_trade(fake_ctx, side="buy")
+                # No real ranked — show summary
                 ranked = result.get("ranked", [])
                 lines = [
                     f"🤖 *Autonomous scan complete — ${amount_usd:.2f}*\n",
                     f"🧠 *Qwen's verdict:* *{qwen_pick or 'SKIP'}* (confidence {qwen_conf:.2f})",
                     f"   _{result.get('qwen_reasoning', '')}_",
                     "",
-                    f"⏸ *Safety net: not auto-executing.* Top picks:",
+                    f"⏸ *No real crypto candidates qualified.* Top picks:",
                 ]
                 for i, r in enumerate(ranked[:3], 1):
                     medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
                     lines.append(f"{medal} {r['symbol']} (composite {r['composite']:.2f})")
                 lines.append("")
                 lines.append("→ `/analyze SYMBOL " + f"{amount_usd}" + "` to drill in")
-                lines.append("→ `/autotrade confirm` to force-execute the suggested pick (if any)")
                 return "\n".join(lines)
 
             # Auto-execute path
@@ -1322,15 +1339,31 @@ class Agent:
 
             # 0. Quick detect: user says "go with $X" or "place a trade" with a dollar
             # amount but no symbol — auto-pick the best pair and execute.
+            # Also catches "go with the 10" (no $) and "go with 10 dollars".
             t_lower = text.lower()
-            if re.search(r"\b(go|place|enter|put|take|deploy|use)\b.*?\$\s*\d+", t_lower) and not re.search(
+            amount = None
+            if re.search(r"\b(go|place|enter|put|take|deploy|use)\b", t_lower) and not re.search(
                 r"\b(buy|sell|long|short)\s+[a-zA-Z]{2,8}\s+\$?\d", t_lower
             ):
+                # Try $X first, then "X dollars", then bare "the X"
                 m = re.search(r"\$\s*(\d+(?:\.\d+)?)", text)
                 if m:
                     amount = float(m.group(1))
-                    if amount > 0:
-                        return self._auto_pick_and_trade(ctx, amount_usd=amount)
+                else:
+                    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars?|bucks|usdt|usd)", t_lower)
+                    if m:
+                        amount = float(m.group(1))
+                    else:
+                        # "go with the 10" — bare number after "the"
+                        m = re.search(r"\b(?:go|use|deploy|take|place|put|enter)\b.*?\bthe\s+(\d+(?:\.\d+)?)", t_lower)
+                        if m:
+                            amount = float(m.group(1))
+                        else:
+                            m = re.search(r"\b(?:go|use|deploy|take|place|put|enter)\b.*?\b(\d+(?:\.\d+)?)\s*(?:dollar|buck|usdt)?", t_lower)
+                            if m:
+                                amount = float(m.group(1))
+                if amount and amount > 0:
+                    return self._auto_pick_and_trade(ctx, amount_usd=amount)
 
             # 1. Detect trade intent via regex (fast, cheap)
             intent = self._extract_trade_intent(text)
@@ -1640,13 +1673,13 @@ class Agent:
     # -------------------------------------------------------------------------
 
     def _handle_trade(self, ctx: AgentContext, side: str) -> str:
-        """The main trade flow: ADVISE → RISK → (maybe HOLD) → EXECUTE → REFLECT.
+        """The main trade flow: ADVISE (soft) → RISK → EXECUTE → REFLECT.
 
-        New advisory step: before risk check, we ask the strategy skill
-        `advise_before_trade` to analyze chart + news + market state and tell
-        us what the right move is. If the advisor strongly disagrees with the
-        user's intent (confidence >= 0.7 and action != user's side), we hold
-        the trade and ask the user to /force-buy, /force-sell, or /abort.
+        The advisor is now a soft warning only. The user is the boss:
+        we always execute the trade they asked for, and just show the
+        advisory note inline so they can see the reasoning. The risk
+        engine is the only hard block (kill switch, max position size,
+        daily loss cap, blacklist).
         """
         symbol = (ctx.args.get("symbol") or "").upper()
         amount_usd = ctx.args.get("amount_usd") or 0
@@ -1688,29 +1721,20 @@ class Agent:
             conflicts = bool(advisory.get("conflicts", False))
             reasoning = advisory.get("reasoning", "")
 
-            # STRONG CONFLICT: advisor disagrees with high confidence
-            # → hold the trade, give the advisory, ask user to confirm
-            if conflicts and confidence >= 0.7:
-                self._pending_advisories[ctx.user_id] = {
-                    "side": side,
-                    "symbol": symbol,
-                    "amount_usd": amount_usd,
-                    "price": price,
-                    "advisory": advisory,
-                    "timestamp": time.time(),
-                }
-                return self._format_advisory_hold(symbol, side, amount_usd, price, advisory)
-
-            # SOFT NUDGE: conflicts but low confidence (or advisor said "hold")
-            # → warn briefly, then proceed
+            # The user is the boss. The advisor is now a SOFT WARNING only.
+            # We no longer hard-block trades even when the advisor strongly disagrees.
+            # Instead, we always proceed and show the warning inline so the user
+            # sees the reasoning but gets their trade executed.
             nudge = ""
             if conflicts or advisor_action == "hold":
+                risks_str = ""
                 if advisory.get("risks"):
-                    nudge = (
-                        f"⚠️ *Advisory note:* {reasoning}\n"
-                        f"  Risks: {', '.join(advisory.get('risks', []))}\n"
-                        f"  (Confidence {confidence:.2f} — proceeding as you asked.)\n\n"
-                    )
+                    risks_str = f"\n  Risks: {', '.join(advisory.get('risks', []))}"
+                nudge = (
+                    f"⚠️ *Advisory note (confidence {confidence:.2f}):* {reasoning}"
+                    f"{risks_str}\n"
+                    f"  Proceeding as you requested.\n\n"
+                )
 
             # RISK CHECK (only after advisory)
             balance = self.bitget.get_account_balance("USDT")
