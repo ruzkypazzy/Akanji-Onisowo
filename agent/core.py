@@ -1320,6 +1320,18 @@ class Agent:
             if not text:
                 return "🤖 Tell me what you want. Examples: `buy 2 dollars of SOL`, `sell my BTC`, `what's the SOL price?`, `analyze ETH`."
 
+            # 0. Quick detect: user says "go with $X" or "place a trade" with a dollar
+            # amount but no symbol — auto-pick the best pair and execute.
+            t_lower = text.lower()
+            if re.search(r"\b(go|place|enter|put|take|deploy|use)\b.*?\$\s*\d+", t_lower) and not re.search(
+                r"\b(buy|sell|long|short)\s+[a-zA-Z]{2,8}\s+\$?\d", t_lower
+            ):
+                m = re.search(r"\$\s*(\d+(?:\.\d+)?)", text)
+                if m:
+                    amount = float(m.group(1))
+                    if amount > 0:
+                        return self._auto_pick_and_trade(ctx, amount_usd=amount)
+
             # 1. Detect trade intent via regex (fast, cheap)
             intent = self._extract_trade_intent(text)
 
@@ -1341,47 +1353,53 @@ class Agent:
         - "sell my BTC", "sell all ETH", "sell 0.1 BTC"
         - "long SOL", "short BTC"
         - "trade ETH with 2 dollars"
+        - "make a 2 dollars trade on ETHUSDT"
+        - "use $4.39 to place a trade"
         - "open a position on SOL with 5 usdt"
         Returns: {"side": "buy"|"sell", "symbol": str|None, "amount_usd": float|None, "raw": text}
         """
         t = text.lower()
-        # Must contain a buy/sell/long/short verb
-        if not re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b", t):
+        # Must contain a trade verb (including 'trade' and 'place')
+        if not re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open|trade|place)\b", t):
             return None
         # Determine side
         side = None
-        if re.search(r"\b(buy|long|purchase|load|ape|enter|open)\b", t):
+        if re.search(r"\b(buy|long|purchase|load|ape|enter|open|trade|place)\b", t):
             side = "buy"
         elif re.search(r"\b(sell|short|dispose|dump|fade)\b", t):
             side = "sell"
         if not side:
             return None
-        # Extract amount
+        # Extract amount. Search the WHOLE text in priority order:
+        # 1) "$X" anywhere
+        # 2) "X dollars" or "X bucks"
+        # 3) "with/for $X"
+        # 4) "X" right after the trade verb ("buy 2 SOL")
         amount_usd = None
-        # "buy 2 SOL", "buy 2 dollars of SOL"
-        m = re.search(r"(?:buy|sell|long|short|load|ape|dump|fade|enter|open)\s+\$?(\d+(?:\.\d+)?)\s*(?:dollars?|usdt|usdc|usd|of)?", t)
+        # "$X"
+        m = re.search(r"\$\s*(\d+(?:\.\d+)?)", t)
         if m:
             amount_usd = float(m.group(1))
-        # "buy $2 of SOL" (dollar sign first)
+        # "X dollars" / "X bucks" / "X usdt"
         if amount_usd is None:
-            m = re.search(r"\$\s*(\d+(?:\.\d+)?)", t)
+            m = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars?|bucks|usdt|usdc|usd)", t)
             if m:
                 amount_usd = float(m.group(1))
-        # "with 2 dollars", "with $5"
+        # "with/for X"
         if amount_usd is None:
-            m = re.search(r"with\s+\$?(\d+(?:\.\d+)?)\s*(?:dollars?|usdt|usdc|usd)?", t)
+            m = re.search(r"(?:with|for|use|using)\s+\$?(\d+(?:\.\d+)?)", t)
             if m:
                 amount_usd = float(m.group(1))
-        # "for 2", "for $2"
+        # "buy 2 SOL" — number right after the trade verb
         if amount_usd is None:
-            m = re.search(r"for\s+\$?(\d+(?:\.\d+)?)", t)
+            m = re.search(r"\b(?:buy|sell|long|short|load|ape|dump|fade|enter|open|trade|place)\s+\$?(\d+(?:\.\d+)?)\b", t)
             if m:
                 amount_usd = float(m.group(1))
         # Extract symbol. Prefer words AFTER the trade verb, so "I want to ape
         # into SOL" picks SOL (not WANT).
-        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did", "up", "down", "out", "off", "more", "less", "bit", "little", "much", "many", "few", "lot", "just", "now", "then", "soon", "today", "tomorrow", "yesterday", "good", "bad", "big", "small", "high", "low", "right", "wrong", "best", "worst"}
+        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "you", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did", "up", "down", "out", "off", "more", "less", "bit", "little", "much", "many", "few", "lot", "just", "now", "then", "soon", "today", "tomorrow", "yesterday", "good", "bad", "big", "small", "high", "low", "right", "wrong", "best", "worst", "use", "using", "make", "place", "trade", "pattern", "necessities", "signal", "go", "going", "tape", "market", "current", "pair", "pairs", "execute", "set", "pick", "profit", "loss", "stop", "when", "necessary", "determine", "yourself", "to", "by", "your", "you'd", "lets", "let"}
         # Find substring after the trade verb
-        verb_match = re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b", t)
+        verb_match = re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open|trade|place)\b", t)
         symbol = None
         if verb_match:
             after_verb = t[verb_match.end():]
@@ -1413,11 +1431,9 @@ class Agent:
                 f"Try: `/{side} SYMBOL USDT_AMOUNT`\n"
                 f"Or: `{side} 2 SOL`"
             )
-        if not symbol:
-            return (
-                f"🤖 Got the {side} for `${amount}`. Which token?\n"
-                f"Reply like: `SOL` or `BTCUSDT`"
-            )
+        if not symbol and amount:
+            # User gave an amount but no symbol — let the bot pick the best pair
+            return self._auto_pick_and_trade(ctx, amount_usd=amount)
         if not amount:
             # Default to $1 if no amount specified (safe fallback)
             amount = 1.0
@@ -1448,6 +1464,70 @@ class Agent:
         except Exception as e:
             logger.exception(f"_handle_trade_prompt failed: {e}")
             return f"❌ Couldn't execute the trade: {e}"
+
+    def _auto_pick_and_trade(self, ctx: AgentContext, amount_usd: float) -> str:
+        """Pick the best crypto pair on the board and trade it. Used when user
+        says things like 'go with $10' or 'place a trade for $5' without naming a symbol.
+        """
+        try:
+            # 1. Run the scan
+            result = self.skills.invoke("find_best_trade", {"amount_usd": amount_usd, "max_candidates": 5})
+            result = result.get("result", result) if isinstance(result, dict) else result
+            if not result.get("ok"):
+                return f"❌ Couldn't find a setup: {result.get('error', 'unknown')}"
+
+            qwen_pick = result.get("qwen_pick")
+            ranked = result.get("ranked", [])
+
+            # If Qwen explicitly skipped, fall back to the top-ranked (real crypto) symbol
+            if (not qwen_pick or qwen_pick == "SKIP") and ranked:
+                # Only use symbols that look like real crypto (USDT pairs)
+                real = [r for r in ranked if r.get("symbol", "").endswith("USDT")]
+                if real:
+                    qwen_pick = real[0]["symbol"]
+                    confidence = real[0].get("composite", 0.5)
+                else:
+                    return "❌ No real crypto candidates qualified. Try a manual /buy instead."
+            else:
+                confidence = result.get("qwen_confidence", 0.5)
+
+            if not qwen_pick or qwen_pick == "SKIP":
+                return "❌ No setup worth trading. The market is choppy — try again later or pick a pair manually with /analyze SYMBOL 2."
+
+            # 2. Use the smart position sizer to compute the actual size
+            balance = self.bitget.get_account_balance("USDT")
+            try:
+                portfolio = self.bitget.get_portfolio_value_usdt()
+            except Exception:
+                portfolio = balance
+
+            size_suggestion = self.skills.invoke("suggest_position_size", {
+                "balance_usd": balance,
+                "confidence": confidence,
+                "signal_score": ranked[0].get("composite", 0.5) if ranked else 0.5,
+                "user_requested_usd": amount_usd,
+            })
+            size_suggestion = size_suggestion.get("result", size_suggestion) if isinstance(size_suggestion, dict) else size_suggestion
+            final_size = size_suggestion.get("size_usd", amount_usd) or amount_usd
+
+            # 3. Execute the trade via the regular _handle_trade flow
+            fake_ctx = AgentContext(
+                user_id=ctx.user_id,
+                user_message=f"/buy {qwen_pick} {final_size}",
+                command="buy",
+                args={"symbol": qwen_pick, "amount_usd": final_size},
+            )
+            header = (
+                f"🤖 *Àkànjí picked:* *{qwen_pick}* (top ranked, conf {confidence:.2f})\n"
+                f"💰 *Size:* `${final_size:.2f}` "
+                f"(balance ${balance:.2f}, suggested by risk engine)\n"
+                f"📋 _{size_suggestion.get('rationale', '').strip()}_\n\n"
+            )
+            execution = self._handle_trade(fake_ctx, side="buy")
+            return header + execution
+        except Exception as e:
+            logger.exception(f"_auto_pick_and_trade failed: {e}")
+            return f"❌ Auto-trade failed: {e}"
 
     def _answer_question(self, ctx: AgentContext, text: str) -> str:
         """Answer a free-form question using Qwen + skills."""

@@ -876,6 +876,100 @@ class TestWATGreeting(unittest.TestCase):
 
         print(f"  ✓ _answer_question: large tool results trimmed; Qwen returned real analysis")
 
+    def test_suggest_position_size_respects_user_amount(self):
+        """suggest_position_size: respects user_requested_usd up to the config max."""
+        from risk.engine import RiskConfig, RiskEngine
+        cfg = RiskConfig(max_trade_usd=5.0, max_position_pct=0.75)
+        engine = RiskEngine(config=cfg)
+        # User asks for $10 but max is $5 → capped at $5
+        result = engine.suggest_position_size(
+            balance_usd=10.0,
+            confidence=0.8,
+            signal_score=0.7,
+            user_requested_usd=10.0,
+        )
+        self.assertEqual(result["size_usd"], 5.0, "Should cap at max_trade_usd=5.0")
+        # User asks for $3 (within max) → exact
+        result = engine.suggest_position_size(
+            balance_usd=10.0,
+            confidence=0.8,
+            signal_score=0.7,
+            user_requested_usd=3.0,
+        )
+        self.assertEqual(result["size_usd"], 3.0)
+        # No user amount: sized from confidence+signal
+        result = engine.suggest_position_size(
+            balance_usd=10.0,
+            confidence=0.9,
+            signal_score=0.8,
+        )
+        self.assertGreater(result["size_usd"], 0)
+        self.assertLessEqual(result["size_usd"], 5.0)
+        # Below minimum
+        result = engine.suggest_position_size(
+            balance_usd=0.4,  # too small to trade
+        )
+        self.assertEqual(result["size_usd"], 0)
+        print(f"  ✓ suggest_position_size: respects user amount, caps at max, rejects too-small balance")
+
+    def test_fuzzy_skill_match(self):
+        """Fuzzy match: get_price → get_ticker, balance → get_balance, etc."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        import os
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
+        agent = Agent()
+        agent.bitget = MagicMock()
+        agent.qwen = MagicMock()
+
+        # Common hallucinations
+        cases = [
+            ("get_price", "get_ticker"),
+            ("price", "get_ticker"),
+            ("balance", "get_balance"),
+            ("scan_market", "universe_scan"),
+            ("market_scan", "universe_scan"),
+        ]
+        for hallucinated, expected in cases:
+            matched = agent.skills._fuzzy_skill_match(hallucinated)
+            self.assertEqual(matched, expected, f"Expected {hallucinated!r} → {expected!r}, got {matched!r}")
+        # Unknown name returns None
+        self.assertIsNone(agent.skills._fuzzy_skill_match("totally_made_up_skill"))
+        print(f"  ✓ _fuzzy_skill_match: {len(cases)} common hallucinations routed correctly")
+
+    def test_extract_trade_intent_dollar_phrasings(self):
+        """_extract_trade_intent: 'I want you to make a 2 dollars trade on ETHUSDT' parses correctly."""
+        from agent.core import Agent
+        from unittest.mock import MagicMock
+        import os
+        os.environ.setdefault("BITGET_API_KEY", "test")
+        os.environ.setdefault("BITGET_SECRET_KEY", "test")
+        os.environ.setdefault("BITGET_PASSPHRASE", "test")
+        os.environ.setdefault("BITGET_QWEN_API_KEY", "test")
+        agent = Agent()
+        agent.bitget = MagicMock()
+        agent.qwen = MagicMock()
+
+        cases = [
+            ("I want you to make a 2 dollars trade on ETHUSDT", {"side": "buy", "symbol": "ETHUSDT", "amount_usd": 2.0}),
+            ("make a 10 dollars trade on BTC", {"side": "buy", "symbol": "BTC", "amount_usd": 10.0}),
+            ("use $4.39 to place a trade", {"side": "buy", "symbol": None, "amount_usd": 4.39}),
+            ("Go in with this signal, use $4.39 to place a trade", {"side": "buy", "symbol": None, "amount_usd": 4.39}),
+            ("trade ETH with 2 dollars", {"side": "buy", "symbol": "ETH", "amount_usd": 2.0}),
+            ("buy 2 SOL", {"side": "buy", "symbol": "SOL", "amount_usd": 2.0}),
+            ("sell my BTC", {"side": "sell", "symbol": "BTC", "amount_usd": None}),
+        ]
+        for text, expected in cases:
+            got = agent._extract_trade_intent(text)
+            self.assertIsNotNone(got, f"Expected intent for: {text!r}")
+            self.assertEqual(got["side"], expected["side"], f"side mismatch for {text!r}")
+            self.assertEqual(got.get("symbol"), expected["symbol"], f"symbol mismatch for {text!r}: got {got.get('symbol')}, expected {expected['symbol']}")
+            self.assertEqual(got.get("amount_usd"), expected["amount_usd"], f"amount mismatch for {text!r}: got {got.get('amount_usd')}, expected {expected['amount_usd']}")
+        print(f"  ✓ _extract_trade_intent: {len(cases)} real-user phrasings parsed correctly")
+
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("  Ọniṣọwọ́ — Smoke tests")

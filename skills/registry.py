@@ -77,6 +77,7 @@ class SkillsRegistry:
 
         # Tier 2: Risk & safety - 12
         self._register(Skill("risk_check_order", "Run an order through the risk engine (no execution)", "risk", self._s_risk_check, {"symbol": "str", "side": "str", "size_usd": "float"}))
+        self._register(Skill("suggest_position_size", "Compute a smart position size from balance, confidence, and signal score. Respects user_requested_usd if set.", "risk", self._s_suggest_position_size, {"balance_usd": "float", "confidence": "float", "signal_score": "float", "user_requested_usd": "float"}))
         self._register(Skill("get_risk_status", "Show current risk engine configuration", "risk", self._s_risk_status, {}))
         self._register(Skill("activate_kill_switch", "Halt all trading (user can release via /release)", "risk", self._s_kill, {"reason": "str"}))
         self._register(Skill("check_drawdown", "Check current drawdown against peak", "risk", self._s_check_drawdown, {}))
@@ -220,8 +221,17 @@ class SkillsRegistry:
 
     def invoke(self, name: str, args: dict) -> dict:
         """Invoke a skill by name with args. Returns the result."""
+        # Fuzzy match: if Qwen invents a skill name, find the closest known one
         if name not in self.skills:
-            return {"error": f"Unknown skill: {name}", "available": list(self.skills.keys())[:20]}
+            fuzzy = self._fuzzy_skill_match(name)
+            if fuzzy:
+                logger.info(f"Skill '{name}' not found; routing to closest match: '{fuzzy}'")
+                name = fuzzy
+            else:
+                return {
+                    "error": f"Unknown skill: {name}",
+                    "available": list(self.skills.keys())[:20],
+                }
 
         skill = self.skills[name]
         try:
@@ -230,6 +240,50 @@ class SkillsRegistry:
         except Exception as e:
             logger.exception(f"Skill {name} failed: {e}")
             return {"ok": False, "skill": name, "error": str(e)}
+
+    def _fuzzy_skill_match(self, name: str) -> Optional[str]:
+        """Find the closest known skill name for a hallucinated or mistyped one.
+
+        Common hallucinations:
+          - get_price -> get_ticker
+          - buy / sell / trade -> place_spot_order (if it has side+symbol args)
+          - price -> get_ticker
+          - balance -> get_balance
+          - market_scan / scan_market -> universe_scan
+        """
+        # Synonym map for common mistakes
+        synonyms = {
+            "get_price": "get_ticker",
+            "price": "get_ticker",
+            "ticker_price": "get_ticker",
+            "current_price": "get_ticker",
+            "fetch_price": "get_ticker",
+            "balance": "get_balance",
+            "get_balance": "get_balance",
+            "my_balance": "get_balance",
+            "portfolio": "get_portfolio_value",
+            "market_scan": "universe_scan",
+            "scan_market": "universe_scan",
+            "scan": "universe_scan",
+            "list_pairs": "universe_scan",
+            "list_markets": "universe_scan",
+            "buy": "place_spot_order",
+            "sell": "place_spot_order",
+            "trade": "place_spot_order",
+            "place_order": "place_spot_order",
+            "place_trade": "place_spot_order",
+            "open_position": "place_spot_order",
+        }
+        lower = name.lower().strip()
+        if lower in synonyms:
+            target = synonyms[lower]
+            if target in self.skills:
+                return target
+        # Substring/levenshtein-lite fallback
+        for known in self.skills:
+            if known in lower or lower in known:
+                return known
+        return None
 
     def invoke_by_name(self, name: str, extra: list) -> str:
         """Invoke a skill with extra args (from /skill command). Returns display text."""
@@ -288,7 +342,7 @@ class SkillsRegistry:
         # Only expose the top 20 most useful skills as tools (avoid token bloat)
         top_skill_names = [
             "place_spot_order", "get_ticker", "get_balance", "get_candles",
-            "risk_check_order", "mev_exposure_check", "sybil_score",
+            "risk_check_order", "suggest_position_size", "mev_exposure_check", "sybil_score",
             "funding_rate_history", "rsi", "macd", "news_fetch",
             "edge_estimator", "thesis_writer", "memory_recall",
             "normalize_symbol", "from_usd", "to_usd", "advise_before_trade",
@@ -434,6 +488,34 @@ class SkillsRegistry:
             portfolio_value_usd=portfolio, open_positions_count=open_count,
         )
         return {"allowed": allowed, "reason": reason}
+
+    def _s_suggest_position_size(
+        self,
+        balance_usd: float = 0,
+        confidence: float = 0.7,
+        signal_score: float = 0.5,
+        user_requested_usd: float = None,
+    ) -> dict:
+        """Suggest a smart position size from balance + confidence + signal.
+
+        If balance_usd is 0, fetch it from Bitget.
+        If user_requested_usd is set, respect it (capped at config max + 95% of balance).
+        """
+        if not balance_usd or balance_usd <= 0:
+            try:
+                balance_usd = self.bitget.get_account_balance("USDT")
+            except Exception:
+                balance_usd = 0
+        result = self.risk.suggest_position_size(
+            balance_usd=balance_usd,
+            confidence=confidence,
+            signal_score=signal_score,
+            user_requested_usd=user_requested_usd,
+        )
+        result["balance_usd"] = round(balance_usd, 2)
+        result["max_trade_usd"] = self.risk.config.max_trade_usd
+        result["max_position_pct"] = self.risk.config.max_position_pct
+        return result
 
     def _s_risk_status(self) -> dict:
         return self.risk.get_status()

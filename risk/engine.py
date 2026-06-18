@@ -20,12 +20,21 @@ from dataclasses import dataclass
 
 @dataclass
 class RiskConfig:
-    """Risk engine configuration. Override via env vars or settings DB."""
+    """Risk engine configuration. Override via env vars or settings DB.
 
-    max_trade_usd: float = float(os.environ.get("MAX_TRADE_USD", "2.00"))
-    max_position_pct: float = 0.40  # 40% of portfolio
+    The defaults are sized for a $10–$500 balance small account.
+    Bump them up for larger accounts via env vars:
+      MAX_TRADE_USD, MAX_POSITION_PCT, MAX_DRAWDOWN_PCT, MAX_DAILY_LOSS_USD
+    """
+
+    # Default 50% of balance per trade (capped via env var). Replaces the old
+    # hardcoded $2/trade which was way too tight for a $10+ account.
+    max_trade_usd: float = float(os.environ.get("MAX_TRADE_USD", "5.00"))
+    # Cap at 75% of portfolio in a single position (was 40%) so the bot can
+    # actually deploy a meaningful chunk when the user asks.
+    max_position_pct: float = float(os.environ.get("MAX_POSITION_PCT", "0.75"))
     max_drawdown_pct: float = float(os.environ.get("MAX_DRAWDOWN_PCT", "0.30"))
-    max_daily_loss_usd: float = 5.00
+    max_daily_loss_usd: float = float(os.environ.get("MAX_DAILY_LOSS_USD", "10.00"))
     max_open_trades: int = 5
     max_leverage: int = 2  # never exceed 2x leverage on futures
     blacklist_symbols: tuple = ("USDC",)  # USDC is the depeg risk example
@@ -108,6 +117,96 @@ class RiskEngine:
             )
 
         return True, f"Drawdown: {drawdown*100:.1f}% (max allowed: {self.config.max_drawdown_pct*100:.0f}%)"
+
+    def suggest_position_size(
+        self,
+        balance_usd: float,
+        confidence: float = 0.7,
+        signal_score: float = 0.5,
+        user_requested_usd: float = None,
+    ) -> dict:
+        """Compute a reasonable position size given balance, signal strength, and confidence.
+
+        Strategy:
+        - Base size: min(balance * max_position_pct, max_trade_usd)
+        - Adjust by confidence: low confidence = 50% of base, high = 100% of base
+        - Adjust by signal_score: 0.4 score = 50% of base, 0.8 score = 100% of base
+        - Respect user_requested_usd if explicitly set, but cap it at max_trade_usd
+        - Never exceed 95% of balance (leave dust for fees)
+
+        Returns: {size_usd, rationale, base, confidence_factor, score_factor}
+        """
+        if balance_usd <= 0:
+            return {"size_usd": 0, "rationale": "No balance available."}
+
+        # Base cap from config
+        base = min(
+            balance_usd * self.config.max_position_pct,
+            self.config.max_trade_usd,
+        )
+        # Don't go below 5% of balance
+        base = max(base, balance_usd * 0.05)
+
+        # Confidence scaling: 0.4 conf → 50% of base, 0.85+ conf → 100% of base
+        if confidence >= 0.85:
+            conf_factor = 1.0
+        elif confidence >= 0.4:
+            conf_factor = 0.5 + (confidence - 0.4) / 0.45 * 0.5
+        else:
+            conf_factor = 0.3
+        # Signal score scaling
+        if signal_score >= 0.8:
+            score_factor = 1.0
+        elif signal_score >= 0.4:
+            score_factor = 0.5 + (signal_score - 0.4) / 0.4 * 0.5
+        else:
+            score_factor = 0.3
+        # Combined adjustment
+        adjustment = (conf_factor + score_factor) / 2
+        adjusted = base * adjustment
+
+        # If user requested a specific size, respect it but cap at max
+        if user_requested_usd is not None and user_requested_usd > 0:
+            final = min(
+                user_requested_usd,
+                balance_usd * 0.95,
+                self.config.max_trade_usd,
+            )
+            rationale = (
+                f"User requested ${user_requested_usd:.2f}. "
+                f"Capped at ${final:.2f} "
+                f"(max ${self.config.max_trade_usd:.2f}, 95% of ${balance_usd:.2f} balance)."
+            )
+        else:
+            final = adjusted
+            rationale = (
+                f"Base ${base:.2f} "
+                f"(from {self.config.max_position_pct*100:.0f}% of ${balance_usd:.2f} "
+                f"or max ${self.config.max_trade_usd:.2f}, whichever is lower). "
+                f"Adjusted by confidence={confidence:.2f} ({conf_factor:.2f}) "
+                f"and signal_score={signal_score:.2f} ({score_factor:.2f}). "
+                f"Final: ${final:.2f}."
+            )
+
+        # Never exceed 95% of balance
+        final = min(final, balance_usd * 0.95)
+        # Never go below $0.50 (Bitget minimum for spot orders)
+        if final < 0.50:
+            return {
+                "size_usd": 0,
+                "rationale": (
+                    f"Computed size ${final:.2f} is below Bitget's minimum order size. "
+                    f"Need at least $0.50."
+                ),
+            }
+
+        return {
+            "size_usd": round(final, 2),
+            "rationale": rationale,
+            "base": round(base, 2),
+            "confidence_factor": round(conf_factor, 2),
+            "score_factor": round(score_factor, 2),
+        }
 
     def activate_kill_switch(self, reason: str = "Manual"):
         """Activate the kill switch. No more trades until released."""
