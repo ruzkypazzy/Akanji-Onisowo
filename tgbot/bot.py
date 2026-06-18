@@ -15,6 +15,7 @@ import re
 import json
 import logging
 import asyncio
+from pathlib import Path
 from typing import Optional
 from telegram import Update
 from telegram.ext import (
@@ -24,6 +25,30 @@ from telegram.ext import (
 from agent.core import Agent, AgentContext
 
 logger = logging.getLogger(__name__)
+
+
+# Brand assets paths (override via env var if user wants to swap)
+REPO_ROOT = Path(__file__).parent.parent
+ASSET_PROFILE = Path(os.environ.get("AKANJI_PROFILE_PICTURE", REPO_ROOT / "assets" / "profile_picture.png"))
+ASSET_BRAND = Path(os.environ.get("AKANJI_BRAND_MARK", REPO_ROOT / "assets" / "brand_mark.png"))
+ASSET_BACKGROUND = Path(os.environ.get("AKANJI_BACKGROUND", REPO_ROOT / "assets" / "background_market_scene.png"))
+
+
+async def _send_photo(update: Update, asset_path: Path, caption: str = ""):
+    """Send a brand asset as a Telegram photo. If file is missing, silently skip."""
+    try:
+        if not asset_path.exists():
+            logger.warning(f"Brand asset not found: {asset_path}")
+            return None
+        with open(asset_path, "rb") as f:
+            return await update.message.reply_photo(
+                photo=f,
+                caption=caption[:1024] if caption else None,
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.warning(f"Could not send photo {asset_path}: {e}")
+        return None
 
 
 HELP_TEXT = (
@@ -197,6 +222,60 @@ def run_bot(token: Optional[str] = None):
             return
         text = update.message.text
         cmd, args = parse_command_args(text)
+
+        # For /start: send the avatar (new symbol) + market scene as inline
+        # photos so the new brand assets show up in the chat immediately
+        # (the profile picture on Telegram itself is uploaded separately).
+        if cmd == "start":
+            try:
+                if ASSET_PROFILE.exists():
+                    with open(ASSET_PROFILE, "rb") as f:
+                        await update.message.reply_photo(
+                            photo=f,
+                            caption=(
+                                "🪶 *Àkànjí Oníṣòwò*\n"
+                                "_Yoruba for merchant. Engineered for the modern market._"
+                            ),
+                            parse_mode="Markdown",
+                        )
+                if ASSET_BACKGROUND.exists():
+                    with open(ASSET_BACKGROUND, "rb") as f:
+                        await update.message.reply_photo(
+                            photo=f,
+                            caption=(
+                                "🛍️ *Welcome to ỌNIṢOWỌ́ MARKET.*\n"
+                                "Stall 1: BTC + ETH  •  Stall 2: SOL + USDT  •  Stall 3: SOL • TON • DOGE • PEPE"
+                            ),
+                            parse_mode="Markdown",
+                        )
+            except Exception as e:
+                logger.warning(f"Could not send start photos: {e}")
+
+        # For /intro: send the brand mark + market scene
+        if cmd == "intro":
+            try:
+                if ASSET_BRAND.exists():
+                    with open(ASSET_BRAND, "rb") as f:
+                        await update.message.reply_photo(
+                            photo=f,
+                            caption=(
+                                "🪶 *Àkànjí Oníṣòwò — The Brand Mark*\n"
+                                "Yoruba market kiosk medallion. No scales, no court iconography — just trade."
+                            ),
+                            parse_mode="Markdown",
+                        )
+                if ASSET_BACKGROUND.exists():
+                    with open(ASSET_BACKGROUND, "rb") as f:
+                        await update.message.reply_photo(
+                            photo=f,
+                            caption=(
+                                "🛍️ *The Market.*\n"
+                                "Yoruba open-air stalls trading crypto tokens — BTC, ETH, SOL, USDT, TON, DOGE, PEPE."
+                            ),
+                            parse_mode="Markdown",
+                        )
+            except Exception as e:
+                logger.warning(f"Could not send intro photos: {e}")
 
         # Show 'typing...' indicator + a status message immediately
         await send_typing(update)
