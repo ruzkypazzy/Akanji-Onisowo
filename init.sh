@@ -125,19 +125,6 @@ else
 fi
 echo "  ✓ Source ready (commit $(git rev-parse --short HEAD))"
 
-# 2b. Verify brand assets are present
-echo ""
-echo "→ Verifying brand assets..."
-if [ -f "assets/background_market_scene.png" ] && \
-   [ -f "assets/profile_picture.png" ] && \
-   [ -f "assets/brand_mark.png" ]; then
-    echo "  ✓ background_market_scene.png  ($(du -h assets/background_market_scene.png | cut -f1))"
-    echo "  ✓ profile_picture.png          ($(du -h assets/profile_picture.png | cut -f1))"
-    echo "  ✓ brand_mark.png                ($(du -h assets/brand_mark.png | cut -f1))"
-else
-    echo "  ⚠️  Some assets missing. Run 'git pull' to refresh."
-fi
-
 if [ -f "app/index.html" ] && [ -f "app/manifest.json" ]; then
     echo "  ✓ Mobile PWA bundle present"
 else
@@ -345,30 +332,11 @@ else
     echo "     sudo journalctl -u $SERVICE_NAME -n 50 --no-pager"
 fi
 
-# 10. (Telegram only) Upload brand profile picture to Telegram
-if [ "$PLATFORM" = "telegram" ] || [ "$PLATFORM" = "both" ]; then
-    if [ -n "$(grep "^TELEGRAM_BOT_TOKEN=.\+" .env)" ] && [ -f "assets/profile_picture.png" ]; then
-        echo ""
-        echo "→ Uploading brand profile picture to Telegram..."
-        if (source .venv/bin/activate && python tools/set_telegram_profile.py); then
-            echo "  ✓ Telegram profile picture set"
-        else
-            echo "  ⚠️  Could not set Telegram profile picture (non-fatal, retry with:"
-            echo "     python tools/set_telegram_profile.py)"
-        fi
-    fi
-fi
-
 # 11. Summary
 echo ""
 echo "============================================================"
 echo "  ✓ Installation complete!"
 echo "============================================================"
-echo ""
-echo "  Brand assets installed:"
-echo "     background_market_scene.png  (16:9 hero)"
-echo "     profile_picture.png          (avatar)"
-echo "     brand_mark.png               (logo / icon)"
 echo ""
 echo "  Manage the bot:"
 echo "     sudo systemctl status $SERVICE_NAME"
