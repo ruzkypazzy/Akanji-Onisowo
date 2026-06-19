@@ -14,7 +14,7 @@
 
 Oniṣòwò is an autonomous trading agent that runs in **your** Telegram, trading on **your** Bitget account, with **your** money — but driven by **Qwen 3.6 Plus**, an AI brain that uses 186 skills to make decisions.
 
-It's a real **trader** that thinks before it acts: it checks MEV exposure before every swap, scores counterparties for sybil risk, and gets better at trading the more it runs. Every reasoning call — *“is this a good entry?”*, *“what’s the risk here?”*, *“should I cut this position?”* — goes through Qwen.
+It's a real **trader** that thinks before it acts: it runs multi-agent bull/bear debate before each decision, scores each setup across 71 technical indicators, and gets better at trading the more it runs. Every reasoning call — *“is this a good entry?”*, *“what’s the risk here?”*, *“should I cut this position?”* — goes through Qwen.
 
 **Why Qwen 3.6 Plus?** It’s fast, it’s smart, and it ships with $30 of free credits via the Bitget hackathon. Out of the box, the bot runs on Qwen. If you ever want to swap to a different LLM, it’s 3 env vars and a restart — but you probably won’t want to.
 
@@ -86,10 +86,10 @@ Each skill is a **callable function** with input schema, output schema, and a do
 
 ## The 4 differentiators
 
-1. **MEV-aware execution**: before every swap, Oniṣòwò checks the MEV exposure of the proposed route. If unprotected, it routes via a private mempool.
-2. **Sybil counterparty scoring**: before entering a low-cap token, it checks the top-10 holders. If 60%+ are sybil clusters, it refuses to enter.
-3. **Recursive self-improvement**: every closed trade is logged with reasoning. The agent reviews its own performance weekly and tunes its strategy.
-4. **Qwen 3.6 Plus as the brain**: every decision call — entry, exit, risk, journal reflection — goes through Qwen 3.6 Plus, the LLM from Alibaba Cloud. Fast, accurate, and cost-efficient. We chose Qwen because it’s the best fit for trading reasoning, and the $30 free credit from the Bitget hackathon makes it zero-cost to start. *(Bonus: the code is also LLM-agnostic, so if you want to swap to OpenAI/DeepSeek/Ollama later, it’s 3 env vars and a restart.)*
+1. **Multi-agent debate (TradingAgents-style)**: before every trade, a bull researcher argues the long case and a bear researcher argues the short case; a research manager adjudicates. Three independent Qwen calls. No single-pass blind spots.
+2. **71 technical indicators**: from Ichimoku + SuperTrend + Parabolic SAR through VWAP + OBV + MFI down to Hurst exponent + Beta + regime detection. All computed from Bitget OHLCV. Pure price action, no on-chain dependencies.
+3. **Recursive self-improvement**: every closed trade is logged with reasoning. The agent reviews its own performance weekly and tunes its strategy (loss_autopsy, edge_half_life_tracker, counterfactual_simulator).
+4. **Qwen 3.6 Plus as the brain**: every decision call — entry, exit, risk, journal reflection — goes through Qwen 3.6 Plus, the LLM from Alibaba Cloud. Fast, accurate, and cost-efficient. We chose Qwen because it's the best fit for trading reasoning, and the $30 free credit from the Bitget hackathon makes it zero-cost to start. *(Bonus: the code is also LLM-agnostic, so if you want to swap to OpenAI/DeepSeek/Ollama later, it's 3 env vars and a restart.)*
 
 ## Safety
 

@@ -485,15 +485,16 @@ class Strategist:
         except Exception:
             pass
 
-        # 3. MEV safety check (skip MEV-exposed symbols for spot)
+        # (Onchain MEV/sybil checks removed in v2.5 — CEX-only)
+        # 3. Liquidity depth check (CEX order book safety)
         try:
             if self.skills is not None:
-                mev = self.skills.invoke("mev_exposure_check", {"symbol": symbol})
-                if mev.get("ok"):
-                    mev_data = mev.get("result", {})
-                    risk = mev_data.get("risk_level", "unknown")
-                    if risk in ("low", "minimal"):
-                        signals["mev_safe"] = f"MEV risk={risk}"
+                depth = self.skills.invoke("liquidity_depth_analyzer", {"symbol": symbol, "size_usd": 1000.0})
+                if depth.get("ok"):
+                    depth_data = depth.get("result", {})
+                    slippage = depth_data.get("estimated_slippage_pct", 0)
+                    if slippage < 0.5:
+                        signals["deep_liquidity"] = f"slippage={slippage:.2f}%"
                         confluence += 1
         except Exception:
             pass
@@ -627,7 +628,7 @@ class Strategist:
                 quote_usd=amount_usd,
                 order_id=order_id,
                 reason=decision.reasoning,
-                skills_used=["strategist_tick", "rsi", "funding_rate_history", "mev_exposure_check"],
+                skills_used=["strategist_tick", "rsi", "funding_rate_history", "liquidity_depth_analyzer"],
                 confidence=0.7,
                 tp_pct=self.config.default_tp_pct,
                 sl_pct=self.config.default_sl_pct,

@@ -356,17 +356,41 @@ class SkillsRegistry:
 
     def invoke_by_name(self, name: str, extra: list) -> str:
         """Invoke a skill with extra args (from /skill command). Returns display text."""
+        if name not in self.skills:
+            return (
+                f"❌ Unknown skill: `{name}`.\n\n"
+                f"Try `/skills` to see all {self.count()} available skills."
+            )
+        skill = self.skills[name]
+        # The most common pattern is: /skill NAME SYMBOL (e.g., /skill ichimoku BTCUSDT)
+        # So pass the first extra arg as 'symbol'.
         args = {}
-        # Try to parse positional args as keyword args
-        if extra:
-            for i, arg in enumerate(extra):
+        params = list(skill.parameters.keys())
+        for i, arg in enumerate(extra):
+            if i < len(params):
+                param_name = params[i]
+                # Try to coerce to the right type
+                ptype = skill.parameters[param_name]
+                if ptype == "int":
+                    try:
+                        args[param_name] = int(arg)
+                    except ValueError:
+                        args[param_name] = arg
+                elif ptype == "float":
+                    try:
+                        args[param_name] = float(arg)
+                    except ValueError:
+                        args[param_name] = arg
+                else:
+                    args[param_name] = arg
+            else:
                 args[f"arg{i}"] = arg
 
         result = self.invoke(name, args)
         if result.get("ok"):
             return f"*Skill `{name}` result:*\n\n```json\n{json.dumps(result['result'], indent=2, default=str)[:2000]}\n```"
         else:
-            return f"❌ Skill `{name}` failed: {result.get('error', 'unknown error')}"
+            return f"❌ Skill `{name}` failed: {result.get('error', 'unknown error')}\n\nUsage: `/skill {name} {' '.join('<' + p + '>' for p in skill.parameters)}`"
 
     # -------------------------------------------------------------------------
     # Display
@@ -381,16 +405,17 @@ class SkillsRegistry:
         tier_names = {
             "core_trading": "1️⃣ Core Trading (Bitget API)",
             "risk": "2️⃣ Risk & Safety",
-            "onchain": "3️⃣ Onchain Intelligence",
+            "indicators": "3️⃣ Technical Indicators",
             "market_intel": "4️⃣ Market Intelligence",
             "sentiment": "5️⃣ Sentiment & News",
             "strategy": "6️⃣ Strategy & Decision",
-            "agent_meta": "7️⃣ Agent Meta (self-improvement)",
-            "user_facing": "8️⃣ User-facing",
-            "utility": "9️⃣ Utilities",
+            "strategy_new": "7️⃣ New CEX Skills (backtest/debate/template)",
+            "agent_meta": "8️⃣ Agent Meta (self-improvement)",
+            "user_facing": "9️⃣ User-facing",
+            "utility": "🔟 Utilities",
         }
 
-        lines = [f"*Oniṣòwò Skills* ({self.count()} total) 🛠️\n"]
+        lines = [f"*Ọniṣọwọ́ Skills* ({self.count()} total) 🛠️\n"]
         for cat_key, cat_name in tier_names.items():
             if cat_key in by_category:
                 skills_in_cat = by_category[cat_key]
@@ -411,13 +436,15 @@ class SkillsRegistry:
         # Only expose the top 20 most useful skills as tools (avoid token bloat)
         top_skill_names = [
             "place_spot_order", "get_ticker", "get_balance", "get_candles",
-            "risk_check_order", "suggest_position_size", "mev_exposure_check", "sybil_score",
+            "risk_check_order", "suggest_position_size",
             "funding_rate_history", "rsi", "macd", "news_fetch",
             "edge_estimator", "thesis_writer", "memory_recall",
             "normalize_symbol", "from_usd", "to_usd", "advise_before_trade",
             "evaluate_open_positions", "strategist_tick",
             "suggest_tp_sl", "score_symbol", "analyze_symbol", "find_best_trade",
-            "atr", "adx", "support_resistance_levels",
+            "atr", "adx", "support_resistance_levels", "ichimoku",
+            "supertrend", "macd_signal_cross", "backtest", "hyperopt",
+            "bull_bear_debate", "strategy_template", "polymarket_signal",
         ]
         schemas = []
         for name in top_skill_names:
@@ -1388,101 +1415,6 @@ class SkillsRegistry:
         if symbol not in self.risk.config.blacklist_symbols:
             self.risk.config.blacklist_symbols = self.risk.config.blacklist_symbols + (symbol,)
         return {"blacklisted": symbol, "current_blacklist": list(self.risk.config.blacklist_symbols)}
-
-    # =========================================================================
-    # Tier 3: Onchain intelligence (stubs/heuristics — full impl needs RPC)
-    # =========================================================================
-
-    def _s_mev_check(self, token: str) -> dict:
-        """Heuristic MEV exposure score based on token liquidity (proxy)."""
-        try:
-            if not token.endswith("USDT"):
-                sym = token + "USDT"
-            else:
-                sym = token
-            ticker = self.bitget.get_ticker(sym)
-            if isinstance(ticker, list) and ticker:
-                ticker = ticker[0]
-            vol = float(ticker.get("baseVolume", 0))
-            # Higher volume = more MEV bots = higher exposure
-            if vol > 1_000_000_000:
-                exposure = "HIGH"
-            elif vol > 100_000_000:
-                exposure = "MEDIUM"
-            else:
-                exposure = "LOW"
-            return {"token": token, "volume_24h": vol, "mev_exposure": exposure, "advice": "Use private mempool for large swaps" if exposure == "HIGH" else "OK"}
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _s_sybil_score(self, wallet: str) -> dict:
-        """Placeholder sybil score. Real implementation needs funding source analysis."""
-        return {
-            "wallet": wallet,
-            "sybil_score": 50,
-            "confidence": 0.3,
-            "note": "Heuristic only. Real implementation traces funding sources.",
-        }
-
-    def _s_holder_conc(self, token: str) -> dict:
-        return {"token": token, "top_10_pct": 0.0, "note": "Stub (needs on-chain holder query)"}
-
-    def _s_contract_safety(self, address: str, chain: str = "eth") -> dict:
-        return {"address": address, "chain": chain, "verified": None, "note": "Stub (needs contract verification API)"}
-
-    def _s_recent_txs(self, token: str, min_usd: float = 10000) -> dict:
-        return {"token": token, "large_tx_count_24h": 0, "note": "Stub (needs on-chain tx scan)"}
-
-    def _s_wallet_age(self, wallet: str) -> dict:
-        return {"wallet": wallet, "age_days": None, "note": "Stub (needs first-tx query)"}
-
-    def _s_funding_source(self, wallet: str) -> dict:
-        return {"wallet": wallet, "funding_source": None, "note": "Stub (needs tx trace)"}
-
-    def _s_approval_check(self, wallet: str) -> dict:
-        return {"wallet": wallet, "active_approvals": 0, "note": "Stub (needs approval indexer)"}
-
-    def _s_token_sniffer(self, address: str, chain: str = "eth") -> dict:
-        return {"address": address, "is_honeypot": None, "note": "Stub (needs contract simulation)"}
-
-    def _s_lp_lock(self, token: str) -> dict:
-        return {"token": token, "lp_locked_pct": 0, "note": "Stub (needs LP locker query)"}
-
-    def _s_top_holders(self, token: str) -> dict:
-        return {"token": token, "top_holders": [], "note": "Stub (needs holder indexer)"}
-
-    def _s_whale_alert(self, token: str) -> dict:
-        return {"token": token, "alert": False, "note": "Stub (needs real-time whale watcher)"}
-
-    def _s_deployer_history(self, address: str, chain: str = "eth") -> dict:
-        return {"address": address, "deployed_tokens": 0, "rugs": 0, "note": "Stub (needs deployer history)"}
-
-    def _s_gas_oracle(self, chain: str = "eth") -> dict:
-        return {"chain": chain, "gas_price_gwei": None, "note": "Stub (needs gas oracle API)"}
-
-    def _s_explorer_link(self, address_or_tx: str, chain: str = "eth") -> dict:
-        explorers = {
-            "eth": "https://etherscan.io",
-            "bsc": "https://bscscan.com",
-            "solana": "https://solscan.io",
-        }
-        base = explorers.get(chain, "https://etherscan.io")
-        return {"url": f"{base}/{'tx' if len(address_or_tx) > 50 else 'address'}/{address_or_tx}"}
-
-    def _s_tx_status(self, tx_hash: str, chain: str = "eth") -> dict:
-        return {"tx_hash": tx_hash, "status": None, "note": "Stub (needs RPC)"}
-
-    def _s_decimals(self, address: str, chain: str = "eth") -> dict:
-        return {"address": address, "decimals": 18, "note": "Stub (default 18)"}
-
-    def _s_supply(self, token: str) -> dict:
-        return {"token": token, "total_supply": 0, "circulating": 0, "note": "Stub"}
-
-    def _s_mint_auth(self, token: str) -> dict:
-        return {"token": token, "can_mint": None, "note": "Stub (needs contract ABI check)"}
-
-    def _s_rug_similar(self, token: str) -> dict:
-        return {"token": token, "similar_rugs": [], "note": "Stub (needs rug database)"}
 
     # =========================================================================
     # Tier 4: Market intelligence
@@ -3155,34 +3087,6 @@ class SkillsRegistry:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def _s_smart_money_tracker(self, symbol: str) -> dict:
-        """Track known alpha wallets' activity on a token. If 3+ smart wallets entered, it's a signal.
-        Returns: {ok, smart_wallets_tracked, recent_buys, signal_strength}
-        """
-        try:
-            # Curated alpha wallet list (in production this'd be a real DB/API)
-            smart_wallets = [
-                "0x28C6c06298d514Db089934071355E5743bf21d60",  # Binance
-                "0x21a31Ee1bF532dDf64a8C0b5b3bC4C4D4C4D4C4D",
-                "0x47ac0Fb4F2D72c249f2B1F5b5C6C5C5C5C5C5C5C",
-                "0x6F7A2BAFb8DD2A1F4D3A3b3F3D3A3b3F3D3A3b3F",
-            ]
-            # Stub: in real impl, query on-chain tx history per wallet for this token
-            # For now, return a synthetic signal based on the symbol hash
-            h = sum(ord(c) for c in symbol)
-            recent_buys = (h % 5)  # 0-4
-            signal_strength = min(1.0, recent_buys / 3)  # 3+ = full signal
-            return {
-                "ok": True, "symbol": symbol,
-                "smart_wallets_tracked": len(smart_wallets),
-                "recent_buys_24h": recent_buys,
-                "signal_strength": round(signal_strength, 2),
-                "recommendation": "strong_buy_signal" if signal_strength >= 0.7 else "watch" if signal_strength >= 0.3 else "no_signal",
-                "note": "Stub — would query on-chain tx history in production",
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
     def _s_liquidity_depth(self, symbol: str, size_usd: float) -> dict:
         """Measure real orderbook depth at ±1%, ±2%, ±5% from mid. Estimate slippage.
         Returns: {ok, depth_at_1pct, depth_at_2pct, depth_at_5pct, estimated_slippage_pct, recommendation}
@@ -3227,65 +3131,6 @@ class SkillsRegistry:
                 "depth_at_5pct_usd": round(min(depth_5pct_bid, depth_5pct_ask), 2),
                 "estimated_slippage_pct": round(est_slippage_pct, 3),
                 "recommendation": rec,
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def _s_unlock_calendar(self, symbol: str) -> dict:
-        """Check upcoming token unlock/vesting events. Flags if a large unlock is within 30 days.
-        Returns: {ok, upcoming_unlocks, total_unlock_pct, days_to_next, recommendation}
-        """
-        try:
-            base = symbol.replace("USDT", "").lower()
-            # Stub data for common tokens (in production: pull from token unlock APIs)
-            known_unlocks = {
-                "arb": [{"date": "2026-07-15", "pct": 1.5, "type": "team"}, {"date": "2026-08-15", "pct": 1.2, "type": "investor"}],
-                "op": [{"date": "2026-06-30", "pct": 2.0, "type": "team"}],
-                "sui": [{"date": "2026-09-01", "pct": 3.0, "type": "investor"}],
-            }
-            unlocks = known_unlocks.get(base, [])
-            # Compute days to next
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc)
-            days_to_next = None
-            for u in unlocks:
-                u_date = datetime.fromisoformat(u["date"]).replace(tzinfo=timezone.utc)
-                d = (u_date - now).days
-                if d > 0 and (days_to_next is None or d < days_to_next):
-                    days_to_next = d
-            total_pct = sum(u["pct"] for u in unlocks)
-            rec = "avoid_holding" if days_to_next and days_to_next < 7 and total_pct > 1.5 else "watch" if total_pct > 1 else "ok"
-            return {
-                "ok": True, "symbol": symbol,
-                "upcoming_unlocks": unlocks,
-                "total_unlock_pct_30d": round(total_pct, 2),
-                "days_to_next_unlock": days_to_next,
-                "recommendation": rec,
-                "note": "Never hold through large team/VC unlock events",
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
-    def _s_bridge_flow(self, symbol: str) -> dict:
-        """Track net bridge inflows/outflows for a token across chains.
-        Returns: {ok, net_flow_24h_usd, direction, top_chains, recommendation}
-        """
-        try:
-            base = symbol.replace("USDT", "").lower()
-            # Stub: synthetic data based on symbol hash (real impl: pull from bridges like LayerZero, Stargate, Wormhole)
-            h = sum(ord(c) for c in base)
-            eth_to_arb = (h * 1000) % 5000000
-            arb_to_eth = (h * 700) % 3000000
-            net = eth_to_arb - arb_to_eth
-            direction = "inflow" if net > 0 else "outflow"
-            rec = "bullish" if net > 1000000 else "bearish" if net < -1000000 else "neutral"
-            return {
-                "ok": True, "symbol": symbol,
-                "eth_to_arb_24h_usd": eth_to_arb,
-                "arb_to_eth_24h_usd": arb_to_eth,
-                "net_flow_24h_usd": net,
-                "direction": direction, "recommendation": rec,
-                "note": "Large inflows often precede buying pressure; outflows signal capital flight",
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}

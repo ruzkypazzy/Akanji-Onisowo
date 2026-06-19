@@ -35,8 +35,7 @@ bash init.sh
 # - Asks for your Telegram bot token
 # - Asks for your Bitget API key + secret + passphrase
 # - Asks for your Qwen API key
-# - Asks which platform: 1=Telegram, 2=App, 3=Both
-# - Sets up systemd service + auto-uploads Telegram profile pic
+# - Sets up systemd service
 ```
 
 After install:
@@ -59,8 +58,7 @@ sudo journalctl -u akanji -f      # live log tail
 | Update from GitHub | `cd /opt/akanji && git pull origin main && sudo systemctl restart akanji` |
 | Run smoke tests | `cd /opt/akanji && source .venv/bin/activate && python -m unittest tests.test_smoke` |
 | Edit .env | `sudo nano /opt/akanji/.env` then `sudo systemctl restart akanji` |
-| Find the repo (if lost) | `find / -name "akanji_photo.jpg" 2>/dev/null` or `systemctl status akanji` |
-| Re-upload Telegram avatar | `cd /opt/akanji && source .venv/bin/activate && python tools/set_bot_photo.py` |
+| Find the repo (if lost) | `systemctl status akanji` (look at `WorkingDirectory=`) |
 
 ---
 
@@ -73,12 +71,6 @@ sudo journalctl -u akanji -n 50 --no-pager
 Look for the actual error (usually a missing env var or import error).
 
 **Bitget signing error?** Make sure your API key has `Read + Trade` permissions only (never Withdraw).
-
-**Bot's Telegram avatar not Àkànjí's photo?**
-```bash
-cd /opt/akanji && source .venv/bin/activate && python tools/set_bot_photo.py
-```
-The photo at `/opt/akanji/assets/akanji_photo.jpg` should be Àkànjí's photo.
 
 **Everything is broken, start over?**
 ```bash
@@ -97,11 +89,13 @@ After `sudo systemctl status akanji` shows `active (running)`:
 1. Open Telegram on your phone
 2. Search for `@OnisowoBot`
 3. Send `/start`
-4. You should see Àkànjí's photo + the Yoruba greeting + the intro
+4. You should see the Yoruba greeting + the intro (no images — pure text)
 5. Try `/price BTCUSDT` — should show live price
 6. Try `/status` — should show your balance
 7. Try `/skills` — should list **186 skills** across 10 tiers
 8. Try `/risk` — should show percentage-based risk settings
+9. Try `/skill ichimoku BTCUSDT` — should return Ichimoku values
+10. Try `/backtest BTCUSDT momentum_breakout 30` — should return a backtest
 
 ---
 
@@ -113,17 +107,16 @@ After `sudo systemctl status akanji` shows `active (running)`:
 ├── main.py               # entry point
 ├── init.sh               # fresh installer
 ├── uninstall.sh          # clean removal
-├── agents.db             # SQLite (trades, journal, memory)
-├── assets/
-│   └── akanji_photo.jpg  # Àkànjí's photo (used on /start)
-├── agent/                # agent core
+├── agents.db             # SQLite (trades, journal, memory, settings)
+├── agent/                # agent core (perceive → decide → execute → reflect)
 ├── clients/              # Bitget + Qwen API clients
 ├── db/                   # SQLite layer
-├── risk/                 # risk engine (percentage-based)
+├── risk/                 # risk engine (percentage-based, scales with balance)
 ├── skills/               # 186 skills in 10 tiers
+│   ├── registry.py
+│   └── indicators.py     # 71 technical indicators
 ├── tgbot/                # Telegram handler
-└── tools/
-    └── set_bot_photo.py  # upload Telegram avatar
+└── tools/                # utility scripts
 ```
 
 ---

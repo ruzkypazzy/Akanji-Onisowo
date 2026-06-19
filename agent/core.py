@@ -63,9 +63,13 @@ Your personality:
 
 Your capabilities:
 - You have 186 skills (functions) you can call. See the tools list.
-- You can read market data, place orders, manage risk, analyze onchain signals.
-- You can score counterparties for sybil risk before entering low-cap positions.
-- You can check MEV exposure before swaps.
+- You can read market data (candles, orderbook, ticker) and compute 71
+  technical indicators (RSI, MACD, BB, Ichimoku, SuperTrend, ATR, OBV, VWAP,
+  Hurst, Beta, and more) entirely from Bitget OHLCV.
+- You can place orders on Bitget (spot + perps) with percentage-based risk
+  engine that scales with the user's account size.
+- You can backtest strategies against historical Bitget data, auto-optimize
+  parameters, and run multi-agent bull/bear debate before each decision.
 - You can run recursive self-improvement on your own trade history.
 
 Your constraints:
@@ -289,51 +293,6 @@ class Agent:
             "_Type `/start` to see the bot's quick start, or just send a prompt — e.g. `buy 2 SOL`._"
         )
 
-    def _cmd_upload_photo(self, ctx: AgentContext) -> str:
-        """Download a photo from a URL and save it as Àkànjí's photo.
-
-        Usage:
-          /upload_photo https://example.com/my-photo.jpg
-
-        After downloading, the bot will display this photo on every
-        /start and /intro reply.
-        """
-        import urllib.request
-        url = (ctx.args.get("url") or "").strip()
-        if not url:
-            return (
-                "❌ *No URL provided.*\n\n"
-                "Usage: `/upload_photo https://example.com/photo.jpg`\n\n"
-                "Or just *send a photo* to this chat — the bot will save it automatically."
-            )
-        if not (url.startswith("http://") or url.startswith("https://")):
-            return "❌ URL must start with http:// or https://"
-
-        assets_dir = Path(__file__).parent.parent / "assets"
-        assets_dir.mkdir(exist_ok=True)
-        target = assets_dir / "akanji_photo.jpg"
-
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = resp.read()
-            if len(data) < 1000:
-                return f"❌ Downloaded file is too small ({len(data)} bytes). Probably not an image."
-            if len(data) > 10_000_000:
-                return f"❌ Downloaded file is too large ({len(data)/1_000_000:.1f} MB). Max 10 MB."
-            with open(target, "wb") as f:
-                f.write(data)
-            return (
-                f"✓ *Photo saved.*\n\n"
-                f"Path: `{target}`\n"
-                f"Size: {len(data)/1024:.1f} KB\n\n"
-                f"Next `/start` will show this photo inline.\n\n"
-                f"_To also set it as the bot's Telegram profile picture, run:_ \n"
-                f"`python tools/set_bot_photo.py` _on the VPS._"
-            )
-        except Exception as e:
-            return f"❌ Download failed: {e}"
-
     def _cmd_help(self, ctx: AgentContext) -> str:
         return (
             "*Oniṣòwò commands:*\n\n"
@@ -351,8 +310,11 @@ class Agent:
             "• `/price SYMBOL` — current price + 24h stats\n"
             "• `/skills` — list all 186 skills\n"
             "• `/skill NAME` — invoke a specific skill\n"
-            "• `/mev TOKEN` — check MEV exposure\n"
-            "• `/sybil 0x...` — score a wallet\n\n"
+            "• `/skill ichimoku BTCUSDT` — run any of 71 indicators\n"
+            "• `/backtest BTCUSDT ema_cross 30` — run a strategy backtest\n"
+            "• `/hyperopt BTCUSDT momentum_breakout` — auto-tune params\n"
+            "• `/debate SOL \"long thesis\"` — multi-agent bull/bear debate\n"
+            "• `/template momentum_breakout` — load a strategy template\n\n"
             "*Safety:*\n"
             "• `/risk` — current risk engine state\n"
             "• `/kill REASON` — activate kill switch (no more trades)\n"
