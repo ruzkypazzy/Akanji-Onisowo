@@ -1,145 +1,136 @@
-# Oniṣòwò v1.0.0 — VPS Push & Launch Guide
+# Oniṣòwò — VPS Quickstart
 
-## TL;DR — 4 commands, ~2 min
+Canonical install location: **`/opt/akanji`** on your VPS (185.2.101.34).
+
+The repo on GitHub is `ruzkypazzy/Onisowo` — the folder on your VPS is `akanji` because that's the systemd service name. **Don't get confused** — they're the same codebase.
+
+---
+
+## Day-to-day — update the live bot
 
 ```bash
-# On your VPS (185.2.101.34, Termius from phone):
-cd ~ && scp <local>:/path/to/onisowo-v1.tar.gz .   # or use sftp/curl
-tar -xzf onisowo-v1.tar.gz
-cd onisowo
+cd /opt/akanji
+sudo systemctl stop akanji
+git pull origin main
+sudo systemctl start akanji
+sudo journalctl -u akanji -n 30 --no-pager    # see latest logs
+```
+
+That's it for a normal update.
+
+---
+
+## First-time install (if you haven't already)
+
+```bash
+# SSH into VPS (185.2.101.34)
+ssh root@185.2.101.34
+
+# Clone the repo at /opt/akanji
+git clone https://github.com/ruzkypazzy/Onisowo.git /opt/akanji
+cd /opt/akanji
+
+# Run the installer (3 min)
 bash init.sh
-# (init.sh will let you edit .env — already has TELEGRAM_BOT_TOKEN added)
-source .venv/bin/activate && python main.py
+# - Asks for your Telegram bot token
+# - Asks for your Bitget API key + secret + passphrase
+# - Asks for your Qwen API key
+# - Asks which platform: 1=Telegram, 2=App, 3=Both
+# - Sets up systemd service + auto-uploads Telegram profile pic
+```
+
+After install:
+```bash
+sudo systemctl status akanji      # should say "active (running)"
+sudo journalctl -u akanji -f      # live log tail
 ```
 
 ---
 
-## Option A — Push to GitHub from VPS (recommended, takes 2 min)
+## Common commands
 
-Step 1: Push the v1 commit to GitHub from VPS
+| What | Command |
+|---|---|
+| Restart bot | `sudo systemctl restart akanji` |
+| Stop bot | `sudo systemctl stop akanji` |
+| Start bot | `sudo systemctl start akanji` |
+| Live logs | `sudo journalctl -u akanji -f` |
+| Last 50 log lines | `sudo journalctl -u akanji -n 50 --no-pager` |
+| Update from GitHub | `cd /opt/akanji && git pull origin main && sudo systemctl restart akanji` |
+| Run smoke tests | `cd /opt/akanji && source .venv/bin/activate && python -m unittest tests.test_smoke` |
+| Edit .env | `sudo nano /opt/akanji/.env` then `sudo systemctl restart akanji` |
+| Find the repo (if lost) | `find / -name "akanji_photo.jpg" 2>/dev/null` or `systemctl status akanji` |
+| Re-upload Telegram avatar | `cd /opt/akanji && source .venv/bin/activate && python tools/set_bot_photo.py` |
+
+---
+
+## If something breaks
+
+**Bot won't start?**
 ```bash
-# On VPS:
-ssh root@185.2.101.34
-cd ~/onisowo  # your existing dir with .env already filled in
-git init -q
-git config user.email "ruzkypazzy@users.noreply.github.com"
-git config user.name "ruzkypazzy"
-git remote add origin https://github.com/ruzkypazzy/Onisowo.git
-git add -A
-git status  # verify .env is NOT in the list (.gitignore protects it)
-git commit -m "v1.0.0 — initial release: 105 skills, 11/11 tests pass"
-git push -u origin main  # will prompt for GitHub username + PAT
+sudo journalctl -u akanji -n 50 --no-pager
 ```
+Look for the actual error (usually a missing env var or import error).
 
-When prompted:
-- Username: `ruzkypazzy`
-- Password: **paste your GitHub PAT** (the one with `repo` scope on `Onisowo`)
+**Bitget signing error?** Make sure your API key has `Read + Trade` permissions only (never Withdraw).
 
-If you don't have a fresh PAT handy, generate one at:
-https://github.com/settings/tokens/new
-- Note: "Onisowo push"
-- Expiration: 7 days
-- Scopes: ✅ `repo` (full control of private repos)
-- Click "Generate token", copy it, paste when prompted
-
-Step 2: Pull + install + run
+**Bot's Telegram avatar not Àkànjí's photo?**
 ```bash
-cd ~/onisowo
-git pull origin main  # should be no-op since you just pushed
-source .venv/bin/activate
-pip install -r requirements.txt
-python main.py
+cd /opt/akanji && source .venv/bin/activate && python tools/set_bot_photo.py
 ```
+The photo at `/opt/akanji/assets/akanji_photo.jpg` should be Àkànjí's photo.
 
-You should see:
-```
-  Ọniṣọwọ́ (Oniṣòwò) — Yoruba AI Trading Agent
-  Bitget:    ✓
-  Qwen:      ✓
-  Telegram:  ✓
-  ...
-  Starting Telegram bot... (Ctrl+C to stop)
-```
-
-## Option B — Tarball transfer (no GitHub needed for now)
-
-If you want to skip GitHub and run the bot first to verify it works:
-
+**Everything is broken, start over?**
 ```bash
-# On VPS:
-cd ~
-# (Transfer the tarball via Termius SFTP, or download from a paste service)
-# For now, the tarball is at /workspace/onisowo-v1.tar.gz in my sandbox.
-# You can either:
-#   (a) Have me push to GitHub first, then `git clone` on VPS
-#   (b) Use Termius to upload the tarball via SFTP
-```
-
-Once tarball is on VPS:
-```bash
-cd ~ && tar -xzf onisowo-v1.tar.gz
-cd onisowo
-bash init.sh
-# init.sh will create .venv, install deps, prompt you to edit .env
-# Your existing .env at ~/onisowo/.env is already correct (you added TELEGRAM_BOT_TOKEN)
-# Just point init.sh at the existing one or skip its edit step
-source .venv/bin/activate
-python main.py
+cd /opt/akanji
+bash uninstall.sh        # remove service + clean files
+git pull origin main     # get latest code
+bash init.sh             # fresh install
 ```
 
 ---
 
 ## Verify it works
 
-Once the bot is running (`python main.py`), open Telegram on your phone:
-1. Search for `@OnisowoBot`
-2. Send `/start`
-3. You should see: "Ọniṣọwọ́ káàlẹ́! 👋"
-4. Try `/price BTCUSDT` — should show live price
-5. Try `/status` — should show your $10.97 USDT balance
-6. Try `/skills` — should list all 105 skills
+After `sudo systemctl status akanji` shows `active (running)`:
+
+1. Open Telegram on your phone
+2. Search for `@OnisowoBot`
+3. Send `/start`
+4. You should see Àkànjí's photo + the Yoruba greeting + the intro
+5. Try `/price BTCUSDT` — should show live price
+6. Try `/status` — should show your balance
+7. Try `/skills` — should list **186 skills** across 10 tiers
+8. Try `/risk` — should show percentage-based risk settings
 
 ---
 
-## First live trade
+## File layout on VPS
 
-Once you're comfortable:
-1. `/buy SOL 2` (capped at $2 by risk engine)
-2. Bot will check balance, get SOL price, run risk check, ask Qwen for reasoning, place order on Bitget
-3. Returns order ID + reasoning + logs to journal
-4. `/journal` to see the trade logged
-
----
-
-## If something breaks
-
-**Bitget error?** Check your API key has `Read + Trade` permissions (not Withdraw).
-**Qwen error?** Check BITGET_QWEN_API_KEY in .env is correct.
-**Telegram silent?** Check TELEGRAM_BOT_TOKEN in .env matches @BotFather.
-
-To check the .env without showing secrets:
-```bash
-wc -l ~/onisowo/.env       # should be 9-10 lines
-grep -c "=" ~/onisowo/.env # should be 8-9 (one per variable)
+```
+/opt/akanji/
+├── .env                  # your secrets (chmod 600, never committed)
+├── main.py               # entry point
+├── init.sh               # fresh installer
+├── uninstall.sh          # clean removal
+├── agents.db             # SQLite (trades, journal, memory)
+├── assets/
+│   └── akanji_photo.jpg  # Àkànjí's photo (used on /start)
+├── agent/                # agent core
+├── clients/              # Bitget + Qwen API clients
+├── db/                   # SQLite layer
+├── risk/                 # risk engine (percentage-based)
+├── skills/               # 186 skills in 10 tiers
+├── tgbot/                # Telegram handler
+└── tools/
+    └── set_bot_photo.py  # upload Telegram avatar
 ```
 
-To run the smoke tests:
-```bash
-cd ~/onisowo
-source .venv/bin/activate
-python tests/test_smoke.py
-```
-Should print 11 "✓" lines.
-
 ---
 
-## Submission checklist (for later, ~June 24)
+## Hackathon submission
 
-- [x] Code shipped (this)
-- [x] 100+ skills (105, 15 deep + 90 stubs)
-- [x] Self-hostable (3-min setup)
-- [x] Open source (MIT)
-- [x] README + SUBMISSION.md
-- [x] /help, /skills, /status work
-- [ ] Live demo: bot responds to /start on Telegram
-- [ ] Submit: github.com/ruzkypazzy/Onisowo + https://t.me/OnisowoBot
+- **Repo URL:** https://github.com/ruzkypazzy/Onisowo
+- **Telegram bot:** https://t.me/OnisowoBot
+- **Hackathon:** [Bitget AI Base Camp S1](https://bitget-ai.gitbook.io/base-camp-hackathon-s1-en)
+- **Track:** 1 — Trading Agent

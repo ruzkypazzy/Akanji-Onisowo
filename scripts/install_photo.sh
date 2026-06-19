@@ -3,7 +3,19 @@
 # Run on VPS. Idempotent — safe to run multiple times.
 set -e
 
-cd "$(dirname "$0")/.." || cd ~/onisowo || cd /opt/akanji || cd /root/onisowo
+# Find the repo. Canonical location is /opt/akanji; fall back to common alternatives.
+if [ -d /opt/akanji/.git ]; then
+  cd /opt/akanji
+elif [ -d "$(dirname "$0")/.." ] && [ -d "$(dirname "$0")/../.git" ]; then
+  cd "$(dirname "$0")/.."
+elif [ -d ~/akanji/.git ]; then
+  cd ~/akanji
+else
+  echo "❌ Can't find the akanji repo. Tried: /opt/akanji, ~/akanji, script-relative."
+  echo "Run this from inside the repo, or set up the repo at /opt/akanji first:"
+  echo "  sudo git clone https://github.com/ruzkypazzy/Onisowo.git /opt/akanji"
+  exit 1
+fi
 echo "→ Working dir: $(pwd)"
 
 if [ ! -d .git ]; then
