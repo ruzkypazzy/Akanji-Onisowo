@@ -1501,19 +1501,29 @@ class Agent:
         - "buy 2 SOL", "buy $2 of SOL", "buy 2 dollars worth of SOL"
         - "sell my BTC", "sell all ETH", "sell 0.1 BTC"
         - "long SOL", "short BTC"
-        - "trade ETH with 2 dollars"
-        - "make a 2 dollars trade on ETHUSDT"
-        - "use $4.39 to place a trade"
         - "open a position on SOL with 5 usdt"
+        - "use $4.39 to buy SOL"
+        - "ape 100 SOL" / "dump my BTC"
+
+        NOT recognized as trades (treated as questions instead):
+        - "Analyze the current market and suggest a pair to trade"
+        - "What should I trade?"
+        - "I want to trade but I'm not sure what"
+        (Generic 'trade' alone is too ambiguous — requires a strong action verb
+         like buy/sell/long/short/ape/dump/load/fade/enter/open.)
+
         Returns: {"side": "buy"|"sell", "symbol": str|None, "amount_usd": float|None, "raw": text}
         """
-        t = text.lower()
-        # Must contain a trade verb (including 'trade' and 'place')
-        if not re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open|trade|place)\b", t):
+        t = text.lower().strip()
+        # Must contain a STRONG trade verb (NOT just 'trade' or 'place' alone)
+        # buy/sell/long/short/ape/dump/load/fade/enter/open
+        # 'trade' and 'place' are too generic and cause false positives.
+        strong_verbs = r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open)\b"
+        if not re.search(strong_verbs, t):
             return None
         # Determine side
         side = None
-        if re.search(r"\b(buy|long|purchase|load|ape|enter|open|trade|place)\b", t):
+        if re.search(r"\b(buy|long|purchase|load|ape|enter|open)\b", t):
             side = "buy"
         elif re.search(r"\b(sell|short|dispose|dump|fade)\b", t):
             side = "sell"
@@ -1541,14 +1551,12 @@ class Agent:
                 amount_usd = float(m.group(1))
         # "buy 2 SOL" — number right after the trade verb
         if amount_usd is None:
-            m = re.search(r"\b(?:buy|sell|long|short|load|ape|dump|fade|enter|open|trade|place)\s+\$?(\d+(?:\.\d+)?)\b", t)
+            m = re.search(r"\b(?:buy|sell|long|short|load|ape|dump|fade|enter|open)\s+\$?(\d+(?:\.\d+)?)\b", t)
             if m:
                 amount_usd = float(m.group(1))
-        # Extract symbol. Prefer words AFTER the trade verb, so "I want to ape
-        # into SOL" picks SOL (not WANT).
-        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "you", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did", "up", "down", "out", "off", "more", "less", "bit", "little", "much", "many", "few", "lot", "just", "now", "then", "soon", "today", "tomorrow", "yesterday", "good", "bad", "big", "small", "high", "low", "right", "wrong", "best", "worst", "use", "using", "make", "place", "trade", "pattern", "necessities", "signal", "go", "going", "tape", "market", "current", "pair", "pairs", "execute", "set", "pick", "profit", "loss", "stop", "when", "necessary", "determine", "yourself", "to", "by", "your", "you'd", "lets", "let"}
-        # Find substring after the trade verb
-        verb_match = re.search(r"\b(buy|sell|long|short|purchase|dispose|dump|load|ape|fade|enter|open|trade|place)\b", t)
+        # Extract symbol. Prefer words AFTER the trade verb.
+        skip = {"buy", "sell", "long", "short", "of", "for", "with", "and", "the", "all", "my", "worth", "dollars", "usdt", "usdc", "usd", "a", "an", "position", "on", "in", "at", "to", "from", "purchase", "dispose", "load", "dump", "ape", "fade", "enter", "open", "into", "some", "any", "want", "i", "you", "please", "pls", "let", "me", "go", "all", "the", "this", "that", "should", "could", "would", "will", "shall", "do", "does", "did", "up", "down", "out", "off", "more", "less", "bit", "little", "much", "many", "few", "lot", "just", "now", "then", "soon", "today", "tomorrow", "yesterday", "good", "bad", "big", "small", "high", "low", "right", "wrong", "best", "worst", "use", "using", "make", "place", "trade", "pattern", "necessities", "signal", "go", "going", "tape", "market", "current", "pair", "pairs", "execute", "set", "pick", "profit", "loss", "stop", "when", "necessary", "determine", "yourself", "to", "by", "your", "you'd", "lets", "let", "analyze", "analysis", "suggest", "recommend", "idea", "think", "advice", "help", "what", "how", "why", "who", "where", "your"}
+        verb_match = re.search(strong_verbs, t)
         symbol = None
         if verb_match:
             after_verb = t[verb_match.end():]
@@ -1561,8 +1569,10 @@ class Agent:
                 if c.lower() not in skip:
                     symbol = c.upper()
                     break
-        if not symbol:
-            return {"side": side, "symbol": None, "amount_usd": amount_usd, "raw": text}
+        # STRICT REQUIREMENT: must have BOTH a clear symbol AND an amount.
+        # If either is missing, treat as a question, not a trade.
+        if not symbol or amount_usd is None or amount_usd <= 0:
+            return None
         return {"side": side, "symbol": symbol, "amount_usd": amount_usd, "raw": text}
 
     def _execute_trade_intent(self, ctx: AgentContext, intent: dict, raw_text: str) -> str:
