@@ -244,6 +244,16 @@ class BitgetClient:
                     size = "1"
             except (TypeError, ValueError):
                 pass
+        # Normalize the size string for Bitget: trim trailing .0 and ensure
+        # it's a string. Bitget's "1.0" sometimes gets parsed oddly, while
+        # "1" works reliably.
+        if size is not None and isinstance(size, str):
+            try:
+                size_f = float(size)
+                if size_f == int(size_f):
+                    size = str(int(size_f))
+            except (TypeError, ValueError):
+                pass
         body = {
             "symbol": symbol,
             "side": side,
