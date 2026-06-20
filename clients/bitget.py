@@ -214,6 +214,16 @@ class BitgetClient:
         # We accept `quote_size` as a friendlier alias for market-buy USDT.
         if quote_size is not None and size is None:
             size = quote_size
+        # Hard floor: Bitget's minTradeUSDT is 1.0 for most pairs. Any sub-$1
+        # market buy is a guaranteed 400 from Bitget. Enforce here at the
+        # lowest layer so NO caller can ever submit a sub-min order.
+        if order_type == "market" and side.lower() == "buy" and size is not None:
+            try:
+                size_f = float(size)
+                if size_f < 1.0:
+                    size = "1"
+            except (TypeError, ValueError):
+                pass
         body = {
             "symbol": symbol,
             "side": side,
