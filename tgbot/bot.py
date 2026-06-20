@@ -95,7 +95,8 @@ def parse_command_args(text: str) -> tuple[str, dict]:
     if cmd in ("start", "help", "about", "status", "balance", "skills", "journal",
                "review", "reflect", "memory", "risk", "release", "settings", "pnl",
                "llm", "llms", "time", "abort", "strategy", "positions",
-               "analyze", "autotrade", "proceed", "intro", "control"):
+               "analyze", "autotrade", "proceed", "intro", "control",
+               "pick", "daily"):
         return (cmd, {})
 
     if cmd == "strategist":
@@ -145,6 +146,8 @@ def run_bot(token: Optional[str] = None):
             BotCommand("proceed", "execute the pending analysis"),
             BotCommand("abort", "cancel a pending advisory or analysis"),
             BotCommand("autotrade", "autonomous mode: scan + pick + execute"),
+            BotCommand("pick", "pick the best trade right now and execute"),
+            BotCommand("daily", "alias for /pick — pick today's trade"),
             BotCommand("strategist", "start/stop/status/tick the autonomous loop"),
             BotCommand("strategy", "show strategy rules"),
             BotCommand("positions", "open positions with adaptive TP/SL"),

@@ -257,13 +257,15 @@ class Agent:
             "backtest engine, hyperopt, multi-agent debate, "
             "and a memory that learns from every trade.\n\n"
             "*Quick start:*\n"
-            "• `/intro` — read Àkànjí's full origin story\n"
+            "• `/pick` — I scan, pick the best trade, execute (the main command)\n"
+            "• `/pick 5` — same but with $5 instead of the default 5% of balance\n"
+            "• `/daily` — alias for /pick (run once a day, build P&L)\n"
             "• `/status` — your portfolio + P&L\n"
-            "• `/buy SOL 2` — buy $2 of SOL (Qwen advises first, you can override)\n"
-            "• `/analyze ETH 2` — deep analysis + bot's TP/SL\n"
-            "• `/autotrade 2` — I scan the market, pick the best, execute\n"
+            "• `/buy SOL 2` — buy $2 of SOL manually (Qwen advises first)\n"
+            "• `/analyze ETH 2` — deep analysis + my suggested TP/SL\n"
+            "• `/autotrade 2` — same as /pick 2 (autonomous mode)\n"
             "• `/strategist start` — autonomous mode on a loop\n"
-            "• `/skills` — list my 186 skills\n"
+            "• `/skills` — list all 186 skills\n"
             "• `/llm` — confirm I'm running on Qwen 3.6 Plus\n"
             "• `/help` — full command list\n\n"
             "Your keys never leave your machine. I'm a self-hostable open-source bot. "
@@ -352,8 +354,7 @@ class Agent:
             "• *Code:* Python 3.10+, open-source, MIT\n\n"
             "*Differentiation:*\n"
             "• *186 skills* organized in 10 tiers (vs typical 5-10) — including 71 technical indicators\n"
-            "• *MEV-aware execution* — checks sandwich-attack risk before every swap\n"
-            "• *Sybil counterparty scoring* — refuses rug-prone tokens\n"
+            "• *Multi-agent debate (TradingAgents-style)* — bull + bear + research manager before each trade\n"
             "• *Recursive self-improvement* — reviews past trades, writes new rules to memory\n"
             "• *Qwen-powered* — Qwen 3.6 Plus is the brain; every decision is a Qwen decision\n"
             "• *Self-hostable* — your keys never leave your machine\n\n"
@@ -754,6 +755,68 @@ class Agent:
     # -------------------------------------------------------------------------
     # Autonomous mode: /autotrade USDT_AMOUNT
     # -------------------------------------------------------------------------
+
+    def _cmd_pick(self, ctx: AgentContext) -> str:
+        """The main entry point. Bot picks the best trade right now and executes it.
+
+        Usage:
+          /pick              (uses default 5% of balance)
+          /pick 5            ($5 trade, capped at risk engine max)
+          /pick $10          (same)
+          /pick spot         (spot market)
+          /pick future       (futures market)
+          /pick spot 5       (combined)
+
+        Oniṣòwò then:
+          1. Scans top 50 USDT pairs by 24h volume
+          2. Computes 9-signal composite score on each
+          3. Asks Qwen to pick the best setup with entry/TP/SL
+          4. Risk-checks (percentage of balance)
+          5. Executes (or previews for one-tap confirm)
+        """
+        msg = (ctx.user_message or "").strip()
+        rest = re.sub(r"^/pick\s*", "", msg, flags=re.IGNORECASE).strip()
+        rest = re.sub(r"^/daily\s*", "", rest, flags=re.IGNORECASE).strip()
+
+        # Parse args
+        tokens = rest.lower().split() if rest else []
+        market = "spot"  # default
+        amount_usd = None
+        for tok in tokens:
+            if tok in ("spot", "future", "futures", "perp", "perps"):
+                market = "spot" if tok == "spot" else "future"
+            elif tok.startswith("$"):
+                try:
+                    amount_usd = float(tok.lstrip("$"))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    amount_usd = float(tok)
+                except ValueError:
+                    pass
+
+        # Default: 5% of balance
+        if amount_usd is None or amount_usd <= 0:
+            try:
+                bal = self.bitget.get_account_balance("USDT") or 0.0
+            except Exception:
+                bal = 0.0
+            if bal > 0:
+                amount_usd = round(bal * 0.05, 2)
+            else:
+                return (
+                    "❌ No balance detected. Specify an amount:\n\n"
+                    "  • `/pick 5` — $5 trade\n"
+                    "  • `/pick $10` — $10 trade\n"
+                    "  • `/pick spot` — spot market (default)\n"
+                    "  • `/pick future 5` — futures market, $5 trade"
+                )
+        return self._auto_pick_and_trade(ctx, amount_usd=amount_usd, market=market)
+
+    def _cmd_daily(self, ctx: AgentContext) -> str:
+        """Alias for /pick. 'Daily' implies the user's preferred routine."""
+        return self._cmd_pick(ctx)
 
     def _cmd_autotrade(self, ctx: AgentContext) -> str:
         """Autonomous trade: bot scans market, picks best, executes.
@@ -1441,43 +1504,71 @@ class Agent:
         """Prompt bot: take any free-form text and act on it.
 
         This is the user's primary interface. The bot:
-        1. Extracts a trade intent (if any): "buy 2 SOL", "sell all my BTC", etc.
-        2. For trade intents, runs the full perceive→advise→risk→execute→reflect flow.
-        3. For non-trade intents, treats the message as a question for Qwen.
-        4. Always shows the user what it understood before acting (safety net).
+        1. Detects "pick me a trade / daily trade / find me a trade" → autotrade flow
+        2. Detects "go with $X / place a trade" with $X but no symbol → autotrade flow
+        3. Extracts a trade intent (if any): "buy 2 SOL", "sell all my BTC", etc.
+        4. For trade intents, runs the full perceive→advise→risk→execute→reflect flow.
+        5. For non-trade intents, treats the message as a question for Qwen.
+        6. Always shows the user what it understood before acting (safety net).
         """
         try:
             text = (ctx.user_message or "").strip()
             # Strip the leading /ask if present (Telegram sometimes routes /ask <text> here)
             text = re.sub(r"^/ask\s*", "", text, flags=re.IGNORECASE).strip()
             if not text:
-                return "🤖 Tell me what you want. Examples: `buy 2 dollars of SOL`, `sell my BTC`, `what's the SOL price?`, `analyze ETH`."
+                return "🤖 Tell me what you want. Examples: `buy 2 dollars of SOL`, `pick a daily trade for me`, `what's the SOL price?`, `analyze ETH`."
 
-            # 0. Quick detect: user says "go with $X" or "place a trade" with a dollar
-            # amount but no symbol — auto-pick the best pair and execute.
-            # Also catches "go with the 10" (no $) and "go with 10 dollars".
             t_lower = text.lower()
+
+            # 0a. AUTO-PICK intent — phrases like:
+            #   "pick a daily trade for me"
+            #   "do proper analysis and pick a daily trade"
+            #   "what should I buy / sell"
+            #   "find me a good trade"
+            #   "give me the best setup right now"
+            # These trigger autotrade. If amount specified, use it; else use default.
+            autotrade_phrases = [
+                r"\bpick\b.*\btrade\b",
+                r"\bdaily\s+trade\b",
+                r"\bbest\s+(?:trade|setup|pair|coin)\b",
+                r"\bgood\s+trade\b",
+                r"\bsuggest\s+(?:a\s+)?trade\b",
+                r"\bsuggest\s+(?:a\s+)?(?:coin|pair|setup)\b",
+                r"\brecommend\s+(?:a\s+)?trade\b",
+                r"\bwhat\s+(?:should|can|do)\s+i\s+(?:buy|sell|trade|enter)\b",
+                r"\bfind\s+(?:me\s+)?(?:a\s+)?(?:trade|setup|opportunity)\b",
+                r"\bgive\s+me\s+(?:a\s+)?trade\b",
+                r"\banalyze\s+and\s+(?:pick|trade|enter)\b",
+                r"\bproper\s+analysis\b",
+                r"\bautotrade\b",
+            ]
+            wants_autotrade = any(re.search(p, t_lower) for p in autotrade_phrases)
+            if wants_autotrade:
+                # Try to extract amount
+                amount = self._extract_dollar_amount(text)
+                if not amount or amount <= 0:
+                    # Default: 5% of balance
+                    try:
+                        bal = self.bitget.get_account_balance("USDT") or 0.0
+                    except Exception:
+                        bal = 0.0
+                    if bal > 0:
+                        amount = round(bal * 0.05, 2)
+                    else:
+                        return (
+                            "❌ No balance detected. Specify an amount:\n"
+                            "  • `pick a daily trade with $5`\n"
+                            "  • `do proper analysis and pick a daily trade for $2`\n"
+                            "  • `/autotrade 5`"
+                        )
+                return self._auto_pick_and_trade(ctx, amount_usd=amount)
+
+            # 0b. "go with $X" / "place a trade" with a dollar amount but no symbol
             amount = None
             if re.search(r"\b(go|place|enter|put|take|deploy|use)\b", t_lower) and not re.search(
                 r"\b(buy|sell|long|short)\s+[a-zA-Z]{2,8}\s+\$?\d", t_lower
             ):
-                # Try $X first, then "X dollars", then bare "the X"
-                m = re.search(r"\$\s*(\d+(?:\.\d+)?)", text)
-                if m:
-                    amount = float(m.group(1))
-                else:
-                    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars?|bucks|usdt|usd)", t_lower)
-                    if m:
-                        amount = float(m.group(1))
-                    else:
-                        # "go with the 10" — bare number after "the"
-                        m = re.search(r"\b(?:go|use|deploy|take|place|put|enter)\b.*?\bthe\s+(\d+(?:\.\d+)?)", t_lower)
-                        if m:
-                            amount = float(m.group(1))
-                        else:
-                            m = re.search(r"\b(?:go|use|deploy|take|place|put|enter)\b.*?\b(\d+(?:\.\d+)?)\s*(?:dollar|buck|usdt)?", t_lower)
-                            if m:
-                                amount = float(m.group(1))
+                amount = self._extract_dollar_amount(text)
                 if amount and amount > 0:
                     return self._auto_pick_and_trade(ctx, amount_usd=amount)
 
@@ -1493,6 +1584,23 @@ class Agent:
         except Exception as e:
             logger.exception(f"_cmd_ask failed: {e}")
             return f"❌ Error processing your request: {e}"
+
+    def _extract_dollar_amount(self, text: str) -> Optional[float]:
+        """Extract a USD amount from free-form text. Tries $X, X dollars, bare X."""
+        t = text.lower()
+        # "$X"
+        m = re.search(r"\$\s*(\d+(?:\.\d+)?)", t)
+        if m:
+            return float(m.group(1))
+        # "X dollars" / "X bucks" / "X usdt" / "X usd"
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:dollars?|bucks|usdt|usdc|usd)\b", t)
+        if m:
+            return float(m.group(1))
+        # Bare number after "for $X" / "with $X" / "of $X"
+        m = re.search(r"\b(?:for|with|of|using|use)\s+\$?(\d+(?:\.\d+)?)\b", t)
+        if m:
+            return float(m.group(1))
+        return None
 
     def _extract_trade_intent(self, text: str) -> Optional[dict]:
         """Extract a trade intent from free-form text.
@@ -1624,7 +1732,7 @@ class Agent:
             logger.exception(f"_handle_trade_prompt failed: {e}")
             return f"❌ Couldn't execute the trade: {e}"
 
-    def _auto_pick_and_trade(self, ctx: AgentContext, amount_usd: float) -> str:
+    def _auto_pick_and_trade(self, ctx: AgentContext, amount_usd: float, market: str = "spot") -> str:
         """Pick the best crypto pair on the board and trade it. Used when user
         says things like 'go with $10' or 'place a trade for $5' without naming a symbol.
         """
