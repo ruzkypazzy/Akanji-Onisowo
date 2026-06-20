@@ -757,6 +757,79 @@ class Agent:
     # Autonomous mode: /autotrade USDT_AMOUNT
     # -------------------------------------------------------------------------
 
+    def _agentic_pick_multiple(self, ctx: AgentContext, amount_usd: float, n: int = 3, market: str = "spot") -> str:
+        """Pick N different setups and execute one trade per setup.
+
+        Diversifies across pairs. Useful for building a quick trade log
+        for the Bitget hackathon submission.
+        """
+        try:
+            balance = self.bitget.get_account_balance("USDT") or 0.0
+            try:
+                portfolio = self.bitget.get_portfolio_value_usdt()
+            except Exception:
+                portfolio = balance
+
+            # Pull universe once
+            scan = self.skills.invoke("universe_scan", {"limit": 50})
+            scan = scan.get("result", scan) if isinstance(scan, dict) else scan
+            if not isinstance(scan, dict) or not scan.get("ok"):
+                return f"❌ Universe scan failed: {scan.get('error', 'unknown') if isinstance(scan, dict) else 'unknown'}"
+            candidates = [c for c in scan.get("candidates", []) if c.get("symbol", "").endswith("USDT")]
+            if not candidates:
+                return "❌ No tradeable USDT pairs in the universe."
+
+            # Score each, take top N
+            scored = []
+            for c in candidates[:15]:  # cap analysis to top 15 by volume
+                sym = c["symbol"]
+                try:
+                    score = self.skills.invoke("score_symbol", {"symbol": sym})
+                    score = score.get("result", score) if isinstance(score, dict) else score
+                    if isinstance(score, dict) and score.get("ok"):
+                        scored.append((sym, score.get("composite", 0), c.get("last_price", 0)))
+                except Exception:
+                    continue
+            scored.sort(key=lambda x: x[1], reverse=True)
+            picks = scored[:n]
+
+            if not picks:
+                return "❌ No candidates scored above threshold. Try a single /pick instead."
+
+            # Per-trade size = amount / n, but never less than $1
+            per_trade = max(1.0, amount_usd / len(picks))
+
+            lines = [
+                f"🤖 *Àkànjí multi-pick: {len(picks)} trades*\n",
+                f"Per-trade size: ${per_trade:.2f} (of ${amount_usd:.2f} total, balance ${balance:.2f})\n",
+                f"Market: {market}\n",
+            ]
+            results = []
+            for sym, composite, last_price in picks:
+                try:
+                    exec_result = self.skills.invoke("place_spot_order", {
+                        "symbol": sym,
+                        "side": "buy",
+                        "size_usd": per_trade,
+                    })
+                    exec_result = exec_result.get("result", exec_result) if isinstance(exec_result, dict) else exec_result
+                    order_id = ""
+                    if isinstance(exec_result, dict):
+                        order_id = exec_result.get("orderId") or exec_result.get("clientOid") or "ok"
+                    emoji = "✅" if order_id else "❌"
+                    lines.append(f"{emoji} *{sym}* — score {composite:.2f}, ${per_trade:.2f} at ${last_price:.4f}")
+                    results.append({"symbol": sym, "composite": composite, "size": per_trade, "order": exec_result})
+                except Exception as e:
+                    lines.append(f"❌ *{sym}* — Bitget rejected: {e}")
+                    results.append({"symbol": sym, "error": str(e)})
+
+            filled = sum(1 for r in results if r.get("order"))
+            lines.append(f"\n📊 *Filled: {filled}/{len(picks)} trades*")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.exception(f"_agentic_pick_multiple failed: {e}")
+            return f"❌ Multi-pick failed: {e}"
+
     def _cmd_pick(self, ctx: AgentContext) -> str:
         """The main entry point. Bot picks the best trade right now and executes it.
 
@@ -783,6 +856,8 @@ class Agent:
         tokens = rest.lower().split() if rest else []
         market = "spot"  # default
         amount_usd = None
+        n_trades = 1
+        ambiguous_number = False
         for tok in tokens:
             if tok in ("spot", "future", "futures", "perp", "perps"):
                 market = "spot" if tok == "spot" else "future"
@@ -791,9 +866,27 @@ class Agent:
                     amount_usd = float(tok.lstrip("$"))
                 except ValueError:
                     pass
-            else:
+            elif tok.endswith("usdt") or tok.endswith("usd") or tok.endswith("dollars") or tok.endswith("dollar"):
+                # $5usdt or 5usdt or 5dollars — unambiguous dollar amount
+                num_part = tok.rstrip("usdt").rstrip("usd").rstrip("dollars").rstrip("dollar").lstrip("$")
                 try:
-                    amount_usd = float(tok)
+                    amount_usd = float(num_part)
+                except ValueError:
+                    pass
+            elif tok.endswith("trades") or tok.endswith("trade"):
+                # 3trades = pick 3 different setups
+                num_part = tok.rstrip("trades").rstrip("trade")
+                try:
+                    n_trades = max(1, min(int(num_part), 5))
+                except ValueError:
+                    pass
+            else:
+                # Bare number — accept but mark as ambiguous
+                try:
+                    val = float(tok)
+                    if val > 0 and val < 1000:
+                        amount_usd = val
+                        ambiguous_number = True
                 except ValueError:
                     pass
 
@@ -808,12 +901,23 @@ class Agent:
             else:
                 return (
                     "❌ No balance detected. Specify an amount:\n\n"
-                    "  • `/pick 5` — $5 trade\n"
+                    "  • `/pick $5` — $5 trade\n"
                     "  • `/pick $10` — $10 trade\n"
+                    "  • `/pick 3trades` — pick 3 different setups\n"
                     "  • `/pick spot` — spot market (default)\n"
-                    "  • `/pick future 5` — futures market, $5 trade"
+                    "  • `/pick future $5` — futures market, $5 trade"
                 )
-        return self._agentic_pick_and_trade(ctx, amount_usd=amount_usd, market=market)
+        if n_trades > 1:
+            return self._agentic_pick_multiple(ctx, amount_usd=amount_usd, n=n_trades, market=market)
+        result = self._agentic_pick_and_trade(ctx, amount_usd=amount_usd, market=market)
+        if ambiguous_number:
+            hint = (
+                f"\n\n💡 _Heads up: I treated `/pick {amount_usd}` as a ${amount_usd:.2f} "
+                f"USDT trade. To remove ambiguity, use `/pick ${amount_usd:g}usdt` or just `/pick` "
+                f"for the default size._"
+            )
+            return result + hint
+        return result
 
     def _cmd_daily(self, ctx: AgentContext) -> str:
         """Alias for /pick. 'Daily' implies the user's preferred routine."""
