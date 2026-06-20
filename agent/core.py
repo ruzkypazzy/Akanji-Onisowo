@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 
 from clients.bitget import BitgetClient, BitgetAPIError
 from clients.qwen import QwenClient
@@ -1361,6 +1362,88 @@ class Agent:
                 reason_short = t["reason"][:80] + "..." if len(t["reason"]) > 80 else t["reason"]
                 lines.append(f"   _Reason:_ {reason_short}")
         return "\n".join(lines)
+
+    def _cmd_history(self, ctx: AgentContext) -> str:
+        """Detailed trade history. For submission / proof of usage."""
+        trades = self.db.get_recent_trades(limit=50)
+        if not trades:
+            return "📜 No trade history yet. Run `/pick` to start."
+
+        # Compute summary stats
+        closed = [t for t in trades if t.get("status") == "closed"]
+        open_pos = [t for t in trades if t.get("status") == "open"]
+        total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
+        wins = sum(1 for t in closed if t.get("pnl_usd", 0) > 0)
+        losses = sum(1 for t in closed if t.get("pnl_usd", 0) < 0)
+        win_rate = (wins / len(closed) * 100) if closed else 0
+        total_volume = sum(t.get("quote_usd", 0) for t in trades)
+
+        lines = [
+            f"*📜 Trade History* — {len(trades)} trades total\n",
+            f"*Summary:*",
+            f"  • Open positions: {len(open_pos)}",
+            f"  • Closed trades: {len(closed)} ({wins}W / {losses}L)",
+            f"  • Win rate: {win_rate:.1f}%",
+            f"  • Realized P&L: ${total_pnl:.2f}",
+            f"  • Total volume traded: ${total_volume:.2f}\n",
+            f"*Recent trades:*\n",
+        ]
+        for t in trades[:15]:
+            pnl_emoji = "🟢" if t.get("pnl_usd", 0) > 0 else "🔴" if t.get("pnl_usd", 0) < 0 else "⚪"
+            lines.append(
+                f"{pnl_emoji} `{t['opened_at'][:16]}` "
+                f"{t['side'].upper()} {t['symbol']} "
+                f"@ ${t.get('entry_price', 0):.4f} "
+                f"(${t['quote_usd']:.2f}) "
+                f"→ `{t['status']}`"
+            )
+        return "\n".join(lines)
+
+    def _cmd_export(self, ctx: AgentContext) -> str:
+        """Export trade history as a clean text file (for submission / proof)."""
+        trades = self.db.get_recent_trades(limit=100)
+        if not trades:
+            return "📜 No trades to export yet. Run `/pick` first."
+
+        # Compute stats
+        closed = [t for t in trades if t.get("status") == "closed"]
+        total_pnl = sum(t.get("pnl_usd", 0) for t in closed)
+        wins = sum(1 for t in closed if t.get("pnl_usd", 0) > 0)
+        losses = sum(1 for t in closed if t.get("pnl_usd", 0) < 0)
+        total_volume = sum(t.get("quote_usd", 0) for t in trades)
+
+        lines = [
+            "Àkànjí Oníṣòwò — Trade History Export",
+            f"Generated: {datetime.now().isoformat()}",
+            f"Total trades: {len(trades)}",
+            f"Open: {sum(1 for t in trades if t.get('status') == 'open')}",
+            f"Closed: {len(closed)} ({wins}W / {losses}L)",
+            f"Realized P&L: ${total_pnl:.2f}",
+            f"Total volume: ${total_volume:.2f}",
+            "",
+            f"{'Date':<20} {'Side':<5} {'Symbol':<10} {'Entry':<12} {'Size USD':<10} {'Status':<8} {'PnL USD':<10}",
+            "-" * 80,
+        ]
+        for t in trades:
+            lines.append(
+                f"{t['opened_at'][:19]:<20} "
+                f"{t['side']:<5} "
+                f"{t['symbol']:<10} "
+                f"${t.get('entry_price', 0):<11.4f} "
+                f"${t['quote_usd']:<9.2f} "
+                f"{t['status']:<8} "
+                f"${t.get('pnl_usd', 0):<9.2f}"
+            )
+
+        content = "\n".join(lines)
+        # Write to file
+        out_path = f"/tmp/akanji_trade_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        try:
+            with open(out_path, "w") as f:
+                f.write(content)
+            return f"📤 Exported {len(trades)} trades to `{out_path}`\n\n```\n{content[:2000]}{'...[truncated]' if len(content) > 2000 else ''}\n```"
+        except Exception as e:
+            return f"❌ Export failed: {e}\n\n```\n{content[:1500]}\n```"
 
     def _cmd_skills(self, ctx: AgentContext) -> str:
         return self.skills.list_skills_for_display()

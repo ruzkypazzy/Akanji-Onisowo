@@ -2612,9 +2612,7 @@ class SkillsRegistry:
                 "suggested_tp_sl": suggested_tp_sl,
                 "executes": (
                     qwen_pick and qwen_pick != "SKIP"
-                    and suggested_tp_sl
-                    and suggested_tp_sl.get("passes_rr_filter", False)
-                    and qwen_conf >= 0.6
+                    and (qwen_conf >= 0.4 or qwen_pick in valid_symbols)  # lowered from 0.6
                 ),
             }
         except Exception as e:
