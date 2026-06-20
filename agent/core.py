@@ -779,15 +779,23 @@ class Agent:
             if not candidates:
                 return "❌ No tradeable USDT pairs in the universe."
 
-            # Score each, take top N
+            # Score each, take top N. De-prioritize recently-traded symbols
+            # so the bot diversifies instead of picking SOL/ETH over and over.
+            try:
+                recent_trades = self.db.get_recent_trades(limit=10)
+                recently_traded = [t.get("symbol") for t in recent_trades if t.get("symbol")]
+            except Exception:
+                recently_traded = []
             scored = []
-            for c in candidates[:15]:  # cap analysis to top 15 by volume
+            for c in candidates[:20]:  # wider pool to find variety
                 sym = c["symbol"]
                 try:
                     score = self.skills.invoke("score_symbol", {"symbol": sym})
                     score = score.get("result", score) if isinstance(score, dict) else score
                     if isinstance(score, dict) and score.get("ok"):
-                        scored.append((sym, score.get("composite", 0), c.get("last_price", 0)))
+                        recency_penalty = 0.20 if sym in recently_traded[:3] else 0
+                        comp = score.get("composite", 0) - recency_penalty
+                        scored.append((sym, comp, c.get("last_price", 0), score.get("composite", 0)))
                 except Exception:
                     continue
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -805,7 +813,7 @@ class Agent:
                 f"Market: {market}\n",
             ]
             results = []
-            for sym, composite, last_price in picks:
+            for sym, adj_comp, last_price, orig_comp in picks:
                 try:
                     exec_result = self.skills.invoke("place_spot_order", {
                         "symbol": sym,
@@ -817,8 +825,8 @@ class Agent:
                     if isinstance(exec_result, dict):
                         order_id = exec_result.get("orderId") or exec_result.get("clientOid") or "ok"
                     emoji = "✅" if order_id else "❌"
-                    lines.append(f"{emoji} *{sym}* — score {composite:.2f}, ${per_trade:.2f} at ${last_price:.4f}")
-                    results.append({"symbol": sym, "composite": composite, "size": per_trade, "order": exec_result})
+                    lines.append(f"{emoji} *{sym}* — score {orig_comp:.2f}, ${per_trade:.2f} at ${last_price:.4f}")
+                    results.append({"symbol": sym, "composite": orig_comp, "size": per_trade, "order": exec_result})
                 except Exception as e:
                     lines.append(f"❌ *{sym}* — Bitget rejected: {e}")
                     results.append({"symbol": sym, "error": str(e)})
@@ -1720,12 +1728,20 @@ class Agent:
                 + f"  - Market: {market}\n\n"
                 + f"You have 34 tools available. Use them.\n\n"
                 + f"WORKFLOW:\n"
-                + f"  1. universe_scan to see all viable pairs\n"
-                + f"  2. get_candles + indicator skills on 2-3 candidates that look interesting\n"
+                + f"  1. universe_scan to see the full list of tradeable USDT pairs\n"
+                + f"     on Bitget right now. There are many. Don't pre-bias yourself\n"
+                + f"     toward any specific symbol — let the live data drive the pick.\n"
+                + f"  2. Scan however many pairs you need. Use get_candles, run\n"
+                + f"     indicators (rsi, macd, adx, ema_cross, atr, bb, ichimoku,\n"
+                + f"     supertrend, anything relevant) on whichever pairs show\n"
+                + f"     interesting setups. Spend your tool budget on analysis, not\n"
+                + f"     on the same 3 symbols every time.\n"
                 + f"  3. Pick the best setup. Real trader's rules:\n"
                 + f"     - Trending market (ADX > 25) = ride the trend on pullbacks\n"
                 + f"     - RSI 50-70 with MACD bear cross in an uptrend = buy the dip, not skip\n"
                 + f"     - High 24h volume = better fills, take the trade\n"
+                + f"     - Find setups wherever they are. Could be a major cap, could\n"
+                + f"       be a mid-cap alt. The data decides, not your priors.\n"
                 + f"     - Only skip if EVERY pair is choppy AND volume is dead\n"
                 + f"  4. risk_check_order to confirm position sizing is safe\n"
                 + f"  5. place_spot_order (size_usd is the USDT amount)\n\n"
@@ -1833,7 +1849,7 @@ class Agent:
             # ===========================================================
             if not candidate_symbols:
                 try:
-                    scan = self.skills.invoke("universe_scan", {"limit": 30})
+                    scan = self.skills.invoke("universe_scan", {"limit": 100})
                     scan = scan.get("result", scan) if isinstance(scan, dict) else scan
                     for c in (scan.get("candidates", []) if isinstance(scan, dict) else []):
                         if c.get("symbol"):
@@ -1848,17 +1864,38 @@ class Agent:
                     f"Try again in a minute, or check `/status` for connection issues."
                 )
 
-            # Score the candidates Qwen already looked at; pick highest composite
+            # Score the candidates Qwen already looked at; pick highest composite.
+            # But de-prioritize the symbol we just traded (force variety so the
+            # bot doesn't keep picking SOL/ETH over and over).
+            try:
+                recent_trades = self.db.get_recent_trades(limit=5)
+                recently_traded = [t.get("symbol") for t in recent_trades if t.get("symbol")]
+            except Exception:
+                recently_traded = []
+            # If Qwen only looked at 1-2 symbols, expand to the wider universe
+            # so the bot has real variety to pick from.
+            if len(candidate_symbols) < 5:
+                try:
+                    scan = self.skills.invoke("universe_scan", {"limit": 100})
+                    scan = scan.get("result", scan) if isinstance(scan, dict) else scan
+                    if isinstance(scan, dict) and scan.get("ok"):
+                        for c in scan.get("candidates", []):
+                            sym = c.get("symbol")
+                            if sym and sym not in candidate_symbols:
+                                candidate_symbols.append(sym)
+                except Exception:
+                    pass
             best_symbol = None
             best_score = -1
-            for sym in candidate_symbols[:5]:
+            for sym in candidate_symbols[:20]:
                 if not sym.endswith("USDT"):
                     continue
+                recency_penalty = 0.20 if sym in recently_traded[:2] else (0.10 if sym in recently_traded else 0)
                 try:
                     score = self.skills.invoke("score_symbol", {"symbol": sym})
                     score = score.get("result", score) if isinstance(score, dict) else score
                     if isinstance(score, dict) and score.get("ok"):
-                        comp = score.get("composite", 0)
+                        comp = score.get("composite", 0) - recency_penalty
                         if comp > best_score:
                             best_score = comp
                             best_symbol = sym
@@ -1866,9 +1903,8 @@ class Agent:
                     continue
 
             if not best_symbol:
-                # Last-resort: pick the first viable major-cap candidate
                 for sym in candidate_symbols:
-                    if sym.endswith("USDT"):
+                    if sym.endswith("USDT") and sym not in recently_traded[:3]:
                         best_symbol = sym
                         break
                 if not best_symbol:
