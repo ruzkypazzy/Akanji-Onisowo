@@ -1220,6 +1220,21 @@ class SkillsRegistry:
             return {"ok": False, "error": f"Invalid size_usd: {size_usd}"}
         if size_val < BITGET_REAL_MIN_USDT and side.lower() == "buy":
             size_val = BITGET_REAL_MIN_USDT
+        # SAFETY: cap the trade size at the user's intended amount. If the
+        # caller (Qwen) tries to use the entire balance, we cap at half
+        # the balance minus a buffer, so the user always has USDT left.
+        # This prevents the bot from accidentally liquidating the account.
+        try:
+            current_balance = self.bitget.get_account_balance("USDT") or 0
+            if side.lower() == "buy" and current_balance > 0 and size_val > current_balance * 0.5:
+                original = size_val
+                size_val = round(current_balance * 0.4, 2)  # max 40% of balance
+                logger.warning(
+                    f"place_spot_order: capping size from ${original:.2f} to ${size_val:.2f} "
+                    f"(40% of ${current_balance:.2f} balance) to preserve USDT liquidity"
+                )
+        except Exception:
+            pass
         return self.bitget.place_spot_order(
             symbol=symbol, side=side, order_type="market",
             quote_size=str(size_val) if side == "buy" else None,
