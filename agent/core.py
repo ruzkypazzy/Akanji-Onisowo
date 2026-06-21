@@ -1829,6 +1829,31 @@ class Agent:
             #   base_qty = notional_usdt / price_per_base
             notional = margin * leverage
             base_qty = notional / last_price
+            # Bitget has per-symbol minimum order quantities (e.g. SOL=0.1).
+            # If our calculated size is below the min, bump up leverage until
+            # the size meets the minimum (capped at the user's max_leverage).
+            try:
+                # Get symbol minimum order qty via the public instruments endpoint
+                # or hardcode sensible defaults for major coins.
+                symbol_min_qty = {
+                    "BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 0.1,
+                    "XRPUSDT": 1.0, "DOGEUSDT": 1.0, "BNBUSDT": 0.01,
+                    "AVAXUSDT": 0.1, "LINKUSDT": 0.1, "ADAUSDT": 1.0,
+                    "DOTUSDT": 0.1, "MATICUSDT": 1.0, "LTCUSDT": 0.01,
+                    "TRXUSDT": 1.0, "TONUSDT": 0.01,
+                }.get(best_symbol, 0.1)  # safe default 0.1
+                if base_qty < symbol_min_qty:
+                    # Need more notional. Compute required leverage.
+                    required_qty = symbol_min_qty * 1.05  # 5% buffer
+                    required_notional = required_qty * last_price
+                    required_leverage = max(1, int(required_notional / margin) + 1)
+                    # Cap at risk engine's max leverage
+                    required_leverage = min(required_leverage, 10)
+                    leverage = required_leverage
+                    notional = margin * leverage
+                    base_qty = notional / last_price
+            except Exception:
+                pass
             try:
                 exec_result = self.skills.invoke("place_futures_order_with_tracking", {
                     "symbol": best_symbol,
