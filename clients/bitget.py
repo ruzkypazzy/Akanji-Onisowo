@@ -401,10 +401,26 @@ class BitgetClient:
         """Place a futures order.
 
         Tries V3 (UTA) first, falls back to V2 for classic accounts.
-        For UTA: POST /api/v3/trade/place-order
-        For classic: POST /api/v2/mix/order/place-order
+        V3 needs `category` field (e.g. 'linear' for USDT-margined perps).
+        V2 uses `productType` (e.g. 'USDT-FUTURES').
         """
-        body = {
+        # V3 body: needs category='linear' for USDT-margined, 'inverse' for coin-margined
+        v3_body = {
+            "category": "linear",  # USDT-margined linear perps
+            "symbol": symbol,
+            "marginMode": margin_mode,
+            "marginCoin": "USDT",
+            "size": size,
+            "side": side,
+            "orderType": order_type,
+            "price": price,
+            "leverage": leverage,
+            "clientOid": client_oid or f"onisowo-fut-{int(time.time() * 1000)}",
+        }
+        v3_body = {k: v for k, v in v3_body.items() if v is not None}
+
+        # V2 body: uses productType
+        v2_body = {
             "symbol": symbol,
             "productType": product_type,
             "marginMode": margin_mode,
@@ -416,15 +432,15 @@ class BitgetClient:
             "leverage": leverage,
             "clientOid": client_oid or f"onisowo-fut-{int(time.time() * 1000)}",
         }
-        body = {k: v for k, v in body.items() if v is not None}
+        v2_body = {k: v for k, v in v2_body.items() if v is not None}
         # Try V3 (UTA) first
         try:
-            return self._request("POST", "/api/v3/trade/place-order", body=body)
+            return self._request("POST", "/api/v3/trade/place-order", body=v3_body)
         except BitgetAPIError as e:
             err = str(e)
             # If V3 says we're in classic mode, fall back to V2
             if "404" in err or "not found" in err.lower() or "NOT FOUND" in err:
-                return self._request("POST", "/api/v2/mix/order/place-order", body=body)
+                return self._request("POST", "/api/v2/mix/order/place-order", body=v2_body)
             raise
 
     def set_leverage(self, symbol: str, leverage: str, product_type: str = "USDT-FUTURES") -> dict:
