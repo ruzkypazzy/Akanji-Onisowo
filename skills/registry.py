@@ -62,7 +62,9 @@ class SkillsRegistry:
         """Register all 100+ skills organized by tier."""
         # Tier 1: Core trading (Bitget API wrappers) - 15
         self._register(Skill("place_spot_order", "Place a spot market/limit order on Bitget", "core_trading", self._s_place_spot_order, {"symbol": "str", "side": "str", "size_usd": "float"}))
+        self._register(Skill("place_spot_order_with_tracking", "Place spot order and record in journal with TP/SL", "core_trading", self._s_place_spot_order_with_tracking, {"symbol": "str", "side": "str", "size_usd": "float"}))
         self._register(Skill("cancel_order", "Cancel a pending order by ID", "core_trading", self._s_cancel_order, {"order_id": "str", "symbol": "str"}))
+        self._register(Skill("record_trade", "Record a trade in the journal", "core_trading", self._s_record_trade, {"symbol": "str", "side": "str", "size_usd": "float", "price": "float", "order_id": "str", "reason": "str", "thesis": "str", "market": "str", "tp_pct": "float", "sl_pct": "float"}))
         self._register(Skill("get_balance", "Get USDT balance", "core_trading", self._s_get_balance, {}))
         self._register(Skill("get_ticker", "Get current price for a symbol", "core_trading", self._s_get_ticker, {"symbol": "str"}))
         self._register(Skill("get_orderbook", "Get order book depth for a symbol", "core_trading", self._s_get_orderbook, {"symbol": "str", "limit": "int"}))
@@ -70,6 +72,7 @@ class SkillsRegistry:
         self._register(Skill("get_open_orders", "List all pending orders", "core_trading", self._s_get_open_orders, {}))
         self._register(Skill("get_positions", "List all open futures positions", "core_trading", self._s_get_positions, {}))
         self._register(Skill("place_futures_order", "Place a futures (perps) order", "core_trading", self._s_place_futures_order, {"symbol": "str", "side": "str", "size": "float", "leverage": "int"}))
+        self._register(Skill("place_futures_order_with_tracking", "Place futures order and record in journal with TP/SL", "core_trading", self._s_place_futures_order_with_tracking, {"symbol": "str", "side": "str", "size": "float", "leverage": "int"}))
         self._register(Skill("cancel_all_orders", "Cancel all open orders (panic button)", "core_trading", self._s_cancel_all_orders, {}))
         self._register(Skill("get_account_summary", "Full account summary (all assets + USDT value)", "core_trading", self._s_get_account_summary, {}))
         self._register(Skill("get_funding_rate", "Get current funding rate for a futures symbol", "core_trading", self._s_get_funding_rate, {"symbol": "str"}))
@@ -1209,6 +1212,58 @@ class SkillsRegistry:
     # Skill implementations (Tier 1: Core Trading)
     # =========================================================================
 
+    def _s_place_spot_order_with_tracking(self, symbol: str, side: str, size_usd: float) -> dict:
+        """Place a spot order AND record it in the journal with TP/SL.
+
+        This is the wrapper the agentic flow should use so trades show up
+        in /journal, /history, and /export.
+        """
+        # 1. Get current price for TP/SL calculation
+        try:
+            ticker = self.bitget.get_ticker(symbol)
+            entry_price = float(ticker.get("last", 0)) if isinstance(ticker, dict) else 0
+        except Exception:
+            entry_price = 0
+        # 2. Get TP/SL suggestion
+        tp_pct, sl_pct = 8.0, 4.0  # defaults
+        try:
+            tp_sl = self._s_suggest_tp_sl(symbol=symbol, side=side)
+            if isinstance(tp_sl, dict):
+                tp_pct = float(tp_sl.get("take_profit_pct", 8.0) or 8.0)
+                sl_pct = float(tp_sl.get("stop_loss_pct", 4.0) or 4.0)
+        except Exception:
+            pass
+        # 3. Place the order
+        order_result = self._s_place_spot_order(symbol=symbol, side=side, size_usd=size_usd)
+        if not order_result.get("ok"):
+            return order_result
+        # 4. Extract orderId
+        inner = order_result.get("result", order_result)
+        order_id = ""
+        if isinstance(inner, dict):
+            order_id = inner.get("orderId") or inner.get("clientOid") or ""
+        # 5. Record in journal
+        record = self._s_record_trade(
+            symbol=symbol,
+            side=side,
+            size_usd=size_usd,
+            price=entry_price,
+            order_id=order_id,
+            reason="agentic_pick",
+            thesis=f"auto-picked by bot, TP={tp_pct:.1f}%, SL={sl_pct:.1f}%",
+            market="spot",
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+        )
+        return {
+            "ok": True,
+            "order": order_result,
+            "journal": record,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "entry_price": entry_price,
+        }
+
     def _s_place_spot_order(self, symbol: str, side: str, size_usd: float) -> dict:
         # Defense in depth: enforce Bitget's real minimum here too.
         # The docs say $1, but the actual account minimum is $1.01.
@@ -1252,6 +1307,44 @@ class SkillsRegistry:
     def _s_cancel_order(self, order_id: str, symbol: str) -> dict:
         return self.bitget.cancel_order(symbol=symbol, order_id=order_id)
 
+    def _s_record_trade(
+        self,
+        symbol: str,
+        side: str,
+        size_usd: float = 0,
+        price: float = 0,
+        order_id: str = "",
+        reason: str = "",
+        thesis: str = "",
+        market: str = "spot",
+        tp_pct: float = 0,
+        sl_pct: float = 0,
+    ) -> dict:
+        """Record a trade in the journal so it shows up in /journal and /export.
+
+        Computes the size in base currency from the USDT amount and entry price.
+        """
+        try:
+            size_base = (size_usd / price) if price > 0 else 0
+            trade_id = self.db.record_trade(
+                symbol=symbol,
+                side=side,
+                order_type=market,
+                size=size_base,
+                price=price,
+                quote_usd=size_usd,
+                order_id=order_id,
+                reason=reason,
+                skills_used=["agentic_pick_and_trade"],
+                confidence=0.5,
+                tp_pct=tp_pct if tp_pct > 0 else 8.0,
+                sl_pct=sl_pct if sl_pct > 0 else 4.0,
+                thesis=thesis,
+            )
+            return {"ok": True, "trade_id": trade_id, "symbol": symbol, "side": side, "size_usd": size_usd}
+        except Exception as e:
+            return {"ok": False, "error": f"record_trade failed: {e}"}
+
     def _s_get_balance(self) -> dict:
         return {"usdt": self.bitget.get_account_balance("USDT")}
 
@@ -1287,6 +1380,49 @@ class SkillsRegistry:
         return self.bitget.place_futures_order(
             symbol=symbol, side=side, size=str(size), leverage=str(leverage)
         )
+
+    def _s_place_futures_order_with_tracking(self, symbol: str, side: str, size: float, leverage: int = 1) -> dict:
+        """Place a futures order AND record it in the journal with TP/SL.
+
+        Futures are great for submission because Bitget tracks P&L automatically
+        and the user doesn't have to manually close positions.
+        """
+        # Get current price
+        try:
+            ticker = self.bitget.get_ticker(symbol)
+            entry_price = float(ticker.get("last", 0)) if isinstance(ticker, dict) else 0
+        except Exception:
+            entry_price = 0
+        # Place the order
+        order_result = self._s_place_futures_order(symbol=symbol, side=side, size=size, leverage=leverage)
+        if not order_result.get("ok") and "orderId" not in str(order_result):
+            return order_result
+        # Extract orderId
+        order_id = ""
+        if isinstance(order_result, dict):
+            inner = order_result.get("data", order_result)
+            if isinstance(inner, dict):
+                order_id = inner.get("orderId") or inner.get("clientOid") or ""
+        # Record in journal
+        record = self._s_record_trade(
+            symbol=symbol,
+            side=side,
+            size_usd=size * entry_price if entry_price > 0 else 0,
+            price=entry_price,
+            order_id=order_id,
+            reason=f"futures {leverage}x",
+            thesis=f"futures trade, leverage {leverage}x",
+            market="futures",
+            tp_pct=5.0,
+            sl_pct=2.5,
+        )
+        return {
+            "ok": True,
+            "order": order_result,
+            "journal": record,
+            "leverage": leverage,
+            "entry_price": entry_price,
+        }
 
     def _s_cancel_all_orders(self) -> dict:
         orders = self.bitget.get_pending_orders()

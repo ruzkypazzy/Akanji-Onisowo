@@ -815,7 +815,8 @@ class Agent:
             results = []
             for sym, adj_comp, last_price, orig_comp in picks:
                 try:
-                    exec_result = self.skills.invoke("place_spot_order", {
+                    # Use tracking wrapper so multi-trades get recorded in journal
+                    exec_result = self.skills.invoke("place_spot_order_with_tracking", {
                         "symbol": sym,
                         "side": "buy",
                         "size_usd": per_trade,
@@ -823,7 +824,9 @@ class Agent:
                     exec_result = exec_result.get("result", exec_result) if isinstance(exec_result, dict) else exec_result
                     order_id = ""
                     if isinstance(exec_result, dict):
-                        order_id = exec_result.get("orderId") or exec_result.get("clientOid") or "ok"
+                        inner = exec_result.get("order", exec_result)
+                        if isinstance(inner, dict):
+                            order_id = inner.get("orderId") or inner.get("clientOid") or "ok"
                     emoji = "✅" if order_id else "❌"
                     lines.append(f"{emoji} *{sym}* — score {orig_comp:.2f}, ${per_trade:.2f} at ${last_price:.4f}")
                     results.append({"symbol": sym, "composite": orig_comp, "size": per_trade, "order": exec_result})
@@ -917,6 +920,9 @@ class Agent:
                 )
         if n_trades > 1:
             return self._agentic_pick_multiple(ctx, amount_usd=amount_usd, n=n_trades, market=market)
+        # Futures is a separate flow (different position sizing, different exchange path)
+        if market == "future":
+            return self._agentic_pick_futures(ctx, amount_usd=amount_usd)
         result = self._agentic_pick_and_trade(ctx, amount_usd=amount_usd, market=market)
         if ambiguous_number:
             hint = (
@@ -1696,6 +1702,96 @@ class Agent:
             logger.exception(f"_cmd_reflect failed: {e}")
             return f"❌ Reflection failed: {e}"
 
+    def _agentic_pick_futures(self, ctx: AgentContext, amount_usd: float, leverage: int = 5) -> str:
+        """Pick the best futures setup and execute with leverage.
+
+        Futures are great for the submission because:
+        - Bitget auto-tracks P&L
+        - No need to manually close positions
+        - Built-in liquidation protection
+        - Daily settlement of funding fees
+
+        Args:
+            amount_usd: Margin to use (notional will be amount * leverage)
+            leverage: 1-20x, default 5x (5x is conservative for beginners)
+        """
+        try:
+            balance = self.bitget.get_account_balance("USDT") or 0.0
+            try:
+                portfolio = self.bitget.get_portfolio_value_usdt()
+            except Exception:
+                portfolio = balance
+            # Get all candidate symbols
+            scan = self.skills.invoke("universe_scan", {"limit": 50})
+            scan = scan.get("result", scan) if isinstance(scan, dict) else scan
+            if not isinstance(scan, dict) or not scan.get("ok"):
+                return f"❌ Universe scan failed"
+            candidates = [c for c in scan.get("candidates", []) if c.get("symbol", "").endswith("USDT")]
+            if not candidates:
+                return "❌ No tradeable USDT pairs"
+            # Score top 15
+            scored = []
+            for c in candidates[:15]:
+                sym = c["symbol"]
+                try:
+                    score = self.skills.invoke("score_symbol", {"symbol": sym})
+                    score = score.get("result", score) if isinstance(score, dict) else score
+                    if isinstance(score, dict) and score.get("ok"):
+                        scored.append((sym, score.get("composite", 0), c.get("last_price", 0)))
+                except Exception:
+                    continue
+            scored.sort(key=lambda x: x[1], reverse=True)
+            if not scored:
+                return "❌ No candidates scored"
+            # Anti-repeat: penalize recent
+            try:
+                recent_trades = self.db.get_recent_trades(limit=5)
+                recently_traded = [t.get("symbol") for t in recent_trades if t.get("symbol")]
+            except Exception:
+                recently_traded = []
+            best_symbol = None
+            best_score = -1
+            for sym, comp, last in scored:
+                penalty = 0.20 if sym in recently_traded[:2] else 0
+                effective = comp - penalty
+                if effective > best_score:
+                    best_score = effective
+                    best_symbol = sym
+            if not best_symbol:
+                best_symbol = scored[0][0]
+            # Trade size: use the requested amount as MARGIN
+            # Per-trade = $1.01 minimum, capped at 30% of balance (futures are riskier)
+            margin = max(1.01, min(amount_usd, balance * 0.30))
+            # For futures, size in BASE currency = margin * leverage / price
+            last_price = next((p for s, c, p in scored if s == best_symbol), 0)
+            if last_price <= 0:
+                return f"❌ No price for {best_symbol}"
+            # Bitget futures uses contracts; for USDT-margined perps, size = USDT notional
+            # We pass size as the notional USDT amount (Bitget interprets this correctly)
+            notional = margin * leverage
+            try:
+                exec_result = self.skills.invoke("place_futures_order_with_tracking", {
+                    "symbol": best_symbol,
+                    "side": "buy",
+                    "size": notional,
+                    "leverage": leverage,
+                })
+                exec_result = exec_result.get("result", exec_result) if isinstance(exec_result, dict) else exec_result
+                return (
+                    f"🤖 *Àkànjí futures trade:*\n\n"
+                    f"💱 *{best_symbol}* LONG {leverage}x\n"
+                    f"💰 *Margin:* ${margin:.2f}  |  *Notional:* ${notional:.2f}\n"
+                    f"📊 *Entry:* ~${last_price:.4f}\n\n"
+                    f"*🛠 Why:* Auto-picked highest-scoring candidate from {len(scored)} analyzed. "
+                    f"Futures = automatic P&L tracking, no manual close needed.\n\n"
+                    f"*📊 Execution:*\n```\n{json.dumps(exec_result, indent=2, default=str)[:600]}\n```"
+                )
+            except Exception as e:
+                return f"❌ Futures order failed: {e}"
+        except Exception as e:
+            logger.exception(f"_agentic_pick_futures failed: {e}")
+            return f"❌ Futures auto-trade failed: {e}"
+
     def _agentic_pick_and_trade(self, ctx: AgentContext, amount_usd: float, market: str = "spot") -> str:
         """Multi-step agentic autotrade. Qwen drives the analysis loop, calling any
         of the 34 exposed tools (candles, indicators, orderbook, funding, etc.) as
@@ -1928,12 +2024,16 @@ class Agent:
 
             trade_size = min(amount_usd, max(1.01, balance * 0.05))
             try:
-                exec_result = self.skills.invoke("place_spot_order", {
+                # Use tracking wrapper so the trade gets recorded in the journal
+                # with TP/SL, instead of sitting open forever.
+                exec_result = self.skills.invoke("place_spot_order_with_tracking", {
                     "symbol": best_symbol,
                     "side": "buy",
                     "size_usd": trade_size,
                 })
                 exec_result = exec_result.get("result", exec_result) if isinstance(exec_result, dict) else exec_result
+                tp_pct = exec_result.get("tp_pct", 0) if isinstance(exec_result, dict) else 0
+                sl_pct = exec_result.get("sl_pct", 0) if isinstance(exec_result, dict) else 0
                 return (
                     f"🤖 *Àkànjí executed a trade (auto-fallback: picked strongest of {len(candidate_symbols)} analyzed).*\n\n"
                     f"💱 *{best_symbol}* for ${trade_size:.2f}\n\n"
@@ -1941,6 +2041,7 @@ class Agent:
                     f"auto-picked the highest-scoring candidate from its analysis path "
                     f"to honor your `/pick` command. A trading bot trades.\n\n"
                     f"*🛠 Qwen's analysis path ({len(steps_log)} tool calls):*\n{steps_block}\n\n"
+                    f"📋 *TP/SL:* TP +{tp_pct:.1f}% / SL {sl_pct:.1f}% (will be monitored)\n\n"
                     f"*📊 Execution:*\n```\n{json.dumps(exec_result, indent=2, default=str)[:600]}\n```"
                 )
             except Exception as e:
