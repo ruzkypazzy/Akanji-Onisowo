@@ -404,18 +404,20 @@ class BitgetClient:
         V3 needs `category` field (e.g. 'linear' for USDT-margined perps).
         V2 uses `productType` (e.g. 'USDT-FUTURES').
         """
-        # V3 body: needs category='USDT-FUTURES' (NOT 'linear') and
-        # uses 'qty' field (NOT 'size'). 'size' was a V2 field name.
+        # V3 body: needs category='USDT-FUTURES' and uses 'qty' field.
+        # Also needs positionType='one_way' for accounts that aren't
+        # in hedge mode (default for new accounts).
         v3_body = {
-            "category": "USDT-FUTURES",  # the right category value
+            "category": "USDT-FUTURES",
             "symbol": symbol,
             "marginMode": margin_mode,
             "marginCoin": "USDT",
-            "qty": size,  # V3 uses qty, V2 uses size
+            "qty": size,
             "side": side,
             "orderType": order_type,
             "price": price,
             "leverage": leverage,
+            "positionType": "one_way",  # one-way mode (not hedge)
             "clientOid": client_oid or f"onisowo-fut-{int(time.time() * 1000)}",
         }
         v3_body = {k: v for k, v in v3_body.items() if v is not None}
