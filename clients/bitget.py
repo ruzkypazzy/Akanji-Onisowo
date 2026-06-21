@@ -404,13 +404,14 @@ class BitgetClient:
         V3 needs `category` field (e.g. 'linear' for USDT-margined perps).
         V2 uses `productType` (e.g. 'USDT-FUTURES').
         """
-        # V3 body: needs category='linear' for USDT-margined, 'inverse' for coin-margined
+        # V3 body: needs category='USDT-FUTURES' (NOT 'linear') and
+        # uses 'qty' field (NOT 'size'). 'size' was a V2 field name.
         v3_body = {
-            "category": "linear",  # USDT-margined linear perps
+            "category": "USDT-FUTURES",  # the right category value
             "symbol": symbol,
             "marginMode": margin_mode,
             "marginCoin": "USDT",
-            "size": size,
+            "qty": size,  # V3 uses qty, V2 uses size
             "side": side,
             "orderType": order_type,
             "price": price,
