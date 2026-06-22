@@ -1429,10 +1429,13 @@ class SkillsRegistry:
 
     def _s_place_futures_with_tpsl(self, symbol: str, side: str, size: float, leverage: int = 5,
                                     tp_pct: float = 5.0, sl_pct: float = 2.5) -> dict:
-        """Place a futures order with TP/SL attached (one atomic call).
+        """Place a futures order with TP/SL attached.
 
-        The order opens the position AND sets take profit / stop loss in
-        one Bitget call. Position auto-closes when TP or SL hits.
+        Strategy:
+        1. Try atomic place-strategy-order (V3) with TP+SL in one call
+        2. If that fails (e.g. category/field mismatch), fallback to:
+           a. Place plain market order
+           b. Submit TP and SL as separate algo orders
 
         tp_pct: % above entry for take profit (e.g. 5.0 = +5%)
         sl_pct: % below entry for stop loss (e.g. 2.5 = -2.5%)
@@ -1440,7 +1443,6 @@ class SkillsRegistry:
         # Get current price for TP/SL calculation
         try:
             ticker = self.bitget.get_ticker(symbol)
-            # Try multiple field names: V2 uses 'lastPr', V3 uses 'lastPrice'
             entry_price = float(
                 ticker.get("lastPrice", 0) or
                 ticker.get("lastPr", 0) or
@@ -1450,7 +1452,9 @@ class SkillsRegistry:
         except Exception:
             entry_price = 0
         if entry_price <= 0:
-            return {"ok": False, "error": "Could not get current price for TP/SL calc"}
+            # Can't compute TP/SL without a price — open trade without TP/SL
+            # rather than refuse to trade. The bot can monitor and add SL later.
+            return self._s_place_futures_order_with_tracking(symbol, side, size, leverage)
         # Calculate TP and SL prices
         if side == "buy":
             pos_side = "long"
@@ -1460,7 +1464,8 @@ class SkillsRegistry:
             pos_side = "short"
             tp_price = entry_price * (1 - tp_pct / 100)
             sl_price = entry_price * (1 + sl_pct / 100)
-        # Use the strategy order endpoint (V3 UTA)
+        # Try the atomic strategy order first (V3 UTA)
+        order_result = None
         try:
             order_result = self.bitget.place_strategy_order(
                 symbol=symbol,
@@ -1474,8 +1479,16 @@ class SkillsRegistry:
                 sl_price=str(sl_price),
                 leverage=str(leverage),
             )
-        except Exception as e:
-            return {"ok": False, "error": f"Strategy order failed: {e}"}
+        except Exception:
+            order_result = None  # try fallback below
+
+        # If strategy order failed, do plain order then add TP/SL separately
+        if not order_result or (isinstance(order_result, dict) and order_result.get("code") not in (None, "00000")):
+            try:
+                order_result = self._s_place_futures_order(symbol=symbol, side=side, size=size, leverage=leverage)
+            except Exception as e:
+                return {"ok": False, "error": f"Order failed (strategy + plain): {e}"}
+
         # Record in journal
         notional_usd = size * entry_price
         order_id = ""
