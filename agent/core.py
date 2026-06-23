@@ -298,11 +298,25 @@ class Agent:
 
     def _cmd_help(self, ctx: AgentContext) -> str:
         return (
-            "*Oniṣòwò commands:*\n\n"
-            "*Trading:*\n"
-            "• `/buy SYMBOL USDT_AMOUNT` — e.g., `/buy SOL 100`\n"
-            "• `/sell SYMBOL USDT_AMOUNT` — e.g., `/sell BTC 50`\n"
+            "*Àkànjí Oníṣòwò commands:*\n\n"
+            "*Trading (futures-first, auto-leverage):*\n"
+            "• `/pick` — scan, pick the best futures trade, execute (default)\n"
+            "• `/pick $5` — same with $5 margin\n"
+            "• `/pick 3trades` — pick 3 different futures setups\n"
+            "• `/pickfuture $5` — explicit futures with 5x leverage\n"
+            "• `/pickspot $5` — spot only (no leverage)\n"
+            "• `/buy SYMBOL USDT_AMOUNT` — manual buy, Qwen advises first\n"
+            "• `/sell SYMBOL USDT_AMOUNT` — manual sell\n"
+            "• `/analyze SYMBOL USDT` — deep analysis + bot's TP/SL\n"
+            "• `/proceed` — execute the pending analysis\n"
+            "• `/proceed SL 2 TP 6` — execute with custom SL/TP\n"
             "• `/cancel ORDER_ID` — cancel a pending order\n\n"
+            "*Automation:*\n"
+            "• `/schedule daily 9am` — auto-pick every day at 9 AM UTC\n"
+            "• `/schedule daily 9am spot` — daily spot only\n"
+            "• `/schedule daily 9am futures` — daily futures only\n"
+            "• `/schedule stop` — cancel\n"
+            "• `/schedule status` — show current schedule\n\n"
             "*Portfolio & analysis:*\n"
             "• `/status` — portfolio + balance + open positions\n"
             "• `/balance` — current cash balance\n"
@@ -976,17 +990,18 @@ class Agent:
             else:
                 return (
                     "❌ No balance detected. Specify an amount:\n\n"
-                    "  • `/pick $5` — $5 trade\n"
-                    "  • `/pick $10` — $10 trade\n"
-                    "  • `/pick 3trades` — pick 3 different setups\n"
-                    "  • `/pick spot` — spot market (default)\n"
-                    "  • `/pick future $5` — futures market, $5 trade"
+                    "  • `/pick $5` — $5 futures trade (default)\n"
+                    "  • `/pick $10` — $10 futures trade\n"
+                    "  • `/pick 3trades` — pick 3 different futures setups\n"
+                    "  • `/pick spot` — spot market, no leverage\n"
+                    "  • `/pickfuture $5` — explicit futures, 5x leverage"
                 )
         if n_trades > 1:
             return self._agentic_pick_multiple(ctx, amount_usd=amount_usd, n=n_trades, market=market)
-        # Auto-decide market when not specified: use analysis + account state
+        # Default: futures (the bitget hackathon rewards perp/UTA trading).
+        # The user can override to spot with `/pick spot`.
         if not any(tok in ("spot", "future", "futures") for tok in tokens):
-            market = self._decide_market_for_pick(amount_usd)
+            market = "future"
         # Futures is a separate flow (different position sizing, different exchange path)
         if market == "future":
             return self._agentic_pick_futures(ctx, amount_usd=amount_usd)
