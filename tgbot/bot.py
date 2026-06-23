@@ -109,7 +109,7 @@ def parse_command_args(text: str) -> tuple[str, dict]:
                "review", "reflect", "memory", "risk", "release", "settings", "pnl",
                "llm", "llms", "time", "abort", "strategy", "positions",
                "analyze", "autotrade", "proceed", "intro", "control",
-               "pick", "pickspot", "pickfuture", "daily", "history", "export", "showlog", "sync"):
+               "pick", "pickspot", "pickfuture", "daily", "history", "export", "showlog", "sync", "demo", "tour"):
         return (cmd, {})
 
     if cmd == "strategist":
@@ -135,14 +135,25 @@ def run_bot(token: Optional[str] = None):
             "TELEGRAM_BOT_TOKEN missing. Set it in your .env or pass to run_bot()."
         )
 
+    # Read OWNER_TELEGRAM_ID from env. If set, only this user can run
+    # real-trade commands. Anyone else gets DEMO MODE.
+    OWNER_TELEGRAM_ID = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
+    OWNER_ID_INT = int(OWNER_TELEGRAM_ID) if OWNER_TELEGRAM_ID else 0
+    if OWNER_ID_INT:
+        logger.info(f"Bot is LOCKED to Telegram user_id={OWNER_ID_INT}; everyone else gets demo mode.")
+    else:
+        logger.warning("OWNER_TELEGRAM_ID not set — bot is UNLOCKED. Anyone can trade. Set it in .env.")
+
     # Initialize the agent
     agent = Agent()
+    agent._owner_id = OWNER_ID_INT
 
     # Build the application
     app = Application.builder().token(token).build()
 
     # Make the agent reachable from background tasks via app.bot_data
     app.bot_data["agent"] = agent
+    app.bot_data["owner_id"] = OWNER_ID_INT
 
     # Register the command list with Telegram so they show as clickable chips
     # in the chat UI (instead of having to type /command manually).
@@ -278,6 +289,39 @@ def run_bot(token: Optional[str] = None):
         import re as _re
         m = _re.match(r"^/(\w+)", text.strip())
         cmd_name = m.group(1) if m else "command"
+
+        # OWNER GATE: only the owner can run real-trade commands.
+        # Anyone else is shown the demo mode.
+        owner_id = context.application.bot_data.get("owner_id", 0)
+        user_id = update.effective_user.id if update.effective_user else 0
+        # Commands that touch real money on Bitget:
+        real_money_cmds = {
+            "buy", "sell", "force_buy", "force_sell",
+            "pick", "pickspot", "pickfuture", "autotrade",
+            "close", "cancel", "schedule", "sync",
+            "abortable", "abort", "proceed", "settings", "release", "risk",
+        }
+        is_real_money = cmd_name in real_money_cmds
+        is_owner = (owner_id == 0) or (user_id == owner_id)
+        if is_real_money and not is_owner:
+            await status_msg.edit_text(
+                "\U0001f510 *Demo mode active.*\n\n"
+                "This bot is locked to its owner. You can explore, but you can\u2019t trade.\n\n"
+                "*What you can do here:*\n"
+                "  \u2022 `/demo` \u2014 a 60-second scripted trade demo\n"
+                "  \u2022 `/tour` \u2014 walk through the 14 closed trades + journal trail\n"
+                "  \u2022 `/skills` \u2014 all 190+ skills the agent uses\n"
+                "  \u2022 `/about` \u2014 who \u00c0k\u00e0nj\u00ed is and how the bot works\n\n"
+                "*To use \u00c0k\u00e0nj\u00ed with your own money:*\n"
+                "```\n"
+                "git clone https://github.com/ruzkypazzy/Akanji-Onisowo\n"
+                "cd Akanji-Onisowo && bash install.sh\n"
+                "```\n"
+                "5 minutes. Your keys, your VPS, your trades.",
+                parse_mode="Markdown",
+            )
+            return
+
         # Step-by-step status flow
         if cmd_name in ("buy", "sell"):
             await edit_status(status_msg, "📊 Fetching live price for " + str(args.get("symbol", "?")) + "…")
