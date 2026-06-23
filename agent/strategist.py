@@ -75,12 +75,16 @@ class StrategistConfig:
     auto_enter: bool = True
     # Whether to autonomously manage exits (if False, alerts only)
     auto_exit: bool = True
-    # RSI oversold threshold for entry
+    # RSI oversold threshold for LONG entry
     rsi_oversold: float = 30.0
+    # RSI overbought threshold for SHORT entry
+    rsi_overbought: float = 70.0
     # Funding rate extreme (negative = shorts paying longs, often a bottom signal)
     funding_extreme: float = -0.05
     # Minimum confluence (number of signals that must agree to enter)
     min_confluence: int = 2
+    # Whether the strategist also scans for SHORT entries
+    enable_shorts: bool = True
 
 
 @dataclass
@@ -92,6 +96,7 @@ class TickDecision:
     trade_id: Optional[int]
     reasoning: str
     metrics: dict = field(default_factory=dict)
+    side: str = "buy"  # "buy" (long) or "sell" (short) — direction of entry
 
 
 class Strategist:
@@ -190,14 +195,24 @@ class Strategist:
                 logger.exception(f"Evaluate failed for trade {trade.get('id')}: {e}")
 
         # 2. SCAN — for each watched symbol, look for new entry signals
+        #    Both LONG (oversold) and SHORT (overbought) setups are considered.
         if len(open_trades) < self.config.max_open_positions:
             for symbol in self.config.watchlist:
                 try:
+                    # 2a. LONG (oversold) entries
                     decision = self._scan_for_entry(symbol, open_trades)
                     if decision and decision.decision == "ENTER":
                         decisions.append(decision)
                         if self.config.auto_enter:
                             self._execute_entry(decision)
+                        continue  # don't scan short on the same symbol this tick
+                    # 2b. SHORT (overbought) entries — only if enabled
+                    if self.config.enable_shorts:
+                        decision = self._scan_for_short_entry(symbol, open_trades)
+                        if decision and decision.decision == "ENTER":
+                            decisions.append(decision)
+                            if self.config.auto_enter:
+                                self._execute_entry(decision)
                 except Exception as e:
                     logger.exception(f"Scan failed for {symbol}: {e}")
 
@@ -504,7 +519,7 @@ class Strategist:
 
         # Build a thesis string for this entry
         thesis = " + ".join(signals.values())
-        reasoning = f"Confluence entry ({confluence} signals): {thesis}"
+        reasoning = f"Confluence LONG entry ({confluence} signals): {thesis}"
 
         return TickDecision(
             timestamp=time.time(),
@@ -513,6 +528,84 @@ class Strategist:
             trade_id=None,
             reasoning=reasoning,
             metrics={"confluence": confluence, "signals": signals},
+            side="buy",
+        )
+
+    def _scan_for_short_entry(self, symbol: str, open_trades: list) -> Optional[TickDecision]:
+        """Look for SHORT entry signals. Mirror of _scan_for_entry but bearish.
+
+        Short signals:
+          - RSI overbought (>70) — momentum exhaustion
+          - Funding rate extremely positive — shorts get paid (carry)
+          - Liquidity deep enough to enter short safely
+        """
+        # Skip if we already have a position in this symbol
+        for t in open_trades:
+            if t.get("symbol") == symbol:
+                return None
+
+        signals = {}
+        confluence = 0
+
+        # 1. RSI overbought (bearish reversal setup)
+        try:
+            rsi_val = None
+            if self.skills is not None:
+                r = self.skills.invoke("rsi", {"symbol": symbol, "period": 14})
+                if r.get("ok"):
+                    rsi_val = float(r.get("result", {}).get("rsi", 50))
+            if rsi_val is not None and rsi_val > self.config.rsi_overbought:
+                signals["rsi_overbought"] = f"RSI={rsi_val:.1f} > {self.config.rsi_overbought}"
+                confluence += 1
+        except Exception:
+            pass
+
+        # 2. Funding rate extremely positive (shorts collect funding)
+        try:
+            if self.skills is not None:
+                fr = self.skills.invoke("funding_rate_history", {"symbol": symbol, "days": 1})
+                if fr.get("ok"):
+                    fr_data = fr.get("result", {})
+                    if isinstance(fr_data, list) and fr_data:
+                        recent_fr = float(fr_data[0].get("fundingRate", 0))
+                    elif isinstance(fr_data, dict):
+                        recent_fr = float(fr_data.get("recent", 0))
+                    else:
+                        recent_fr = 0
+                    # Positive funding means longs pay shorts — shorting pays us
+                    if recent_fr > 0.0001:  # 0.01% per 8h = ~11% APR
+                        signals["funding_positive"] = f"funding={recent_fr:.4f} (shorts paid)"
+                        confluence += 1
+        except Exception:
+            pass
+
+        # 3. Liquidity depth check
+        try:
+            if self.skills is not None:
+                depth = self.skills.invoke("liquidity_depth_analyzer", {"symbol": symbol, "size_usd": 1000.0})
+                if depth.get("ok"):
+                    depth_data = depth.get("result", {})
+                    slippage = depth_data.get("estimated_slippage_pct", 0)
+                    if slippage < 0.5:
+                        signals["deep_liquidity"] = f"slippage={slippage:.2f}%"
+                        confluence += 1
+        except Exception:
+            pass
+
+        if confluence < self.config.min_confluence:
+            return None
+
+        thesis = " + ".join(signals.values())
+        reasoning = f"Confluence SHORT entry ({confluence} signals): {thesis}"
+
+        return TickDecision(
+            timestamp=time.time(),
+            decision="ENTER",
+            symbol=symbol,
+            trade_id=None,
+            reasoning=reasoning,
+            metrics={"confluence": confluence, "signals": signals},
+            side="sell",  # SHORT
         )
 
     # ------------------------------------------------------------------
@@ -581,17 +674,23 @@ class Strategist:
             logger.exception(f"Strategist exit failed: {e}")
 
     def _execute_entry(self, decision: TickDecision):
-        """Place the entry order after risk check."""
+        """Place the entry order after risk check.
+
+        Honors decision.side: "buy" (LONG) or "sell" (SHORT). SHORTs use
+        a small negative quote_size on spot if the broker supports it
+        (most spot brokers don't, so we use futures for shorts).
+        """
         try:
             symbol = decision.symbol
             amount_usd = self.config.trade_size_usdt
+            side = (decision.side or "buy").lower()
 
             # Risk check first
             portfolio = self.bitget.get_portfolio_value_usdt()
             open_positions = len(self.db.get_open_trades())
             allowed, reason = self.risk.check_order(
                 symbol=symbol,
-                side="buy",
+                side=side,
                 size_usd=amount_usd,
                 portfolio_value_usd=portfolio,
                 open_positions_count=open_positions,
@@ -609,26 +708,54 @@ class Strategist:
                 return
 
             # Place the order
-            order = self.bitget.place_spot_order(
-                symbol=symbol,
-                side="buy",
-                order_type="market",
-                quote_size=str(amount_usd),
-            )
+            # LONG: buy with USDT
+            # SHORT: sell the base on spot. If we don\'t hold it, fall back
+            # to a futures short. We try spot first because futures shorts
+            # add leverage + funding costs and aren\'t always desired.
+            order_type = "spot"
+            if side == "buy":
+                order = self.bitget.place_spot_order(
+                    symbol=symbol,
+                    side="buy",
+                    order_type="market",
+                    quote_size=str(amount_usd),
+                )
+            else:
+                # For spot shorts, we sell the base currency we need to hold.
+                # Most CEXs reject this with a "no balance" error. Try anyway
+                # — if it fails, fall back to opening a futures short.
+                try:
+                    base_qty = amount_usd / price if price > 0 else 0
+                    order = self.bitget.place_spot_order(
+                        symbol=symbol,
+                        side="sell",
+                        order_type="market",
+                        size=str(base_qty),
+                    )
+                except Exception as spot_err:
+                    logger.warning(f"Spot short failed ({spot_err}); falling back to futures short")
+                    order = self.bitget.place_futures_order(
+                        symbol=symbol,
+                        side="sell",
+                        order_type="market",
+                        size=str(amount_usd / price if price > 0 else 0),
+                        leverage=1,
+                    )
+                    order_type = "futures"
             order_id = order.get("orderId", "")
             size = amount_usd / price if price > 0 else 0
 
             # Record
             self.db.record_trade(
                 symbol=symbol,
-                side="buy",
-                order_type="spot",
+                side=side,
+                order_type=order_type,
                 size=size,
                 price=price,
                 quote_usd=amount_usd,
                 order_id=order_id,
                 reason=decision.reasoning,
-                skills_used=["strategist_tick", "rsi", "funding_rate_history", "liquidity_depth_analyzer"],
+                skills_used=["strategist_tick", "rsi", "funding_rate_history", "liquidity_depth_analyzer", f"side:{side}"],
                 confidence=0.7,
                 tp_pct=self.config.default_tp_pct,
                 sl_pct=self.config.default_sl_pct,
@@ -637,16 +764,17 @@ class Strategist:
             )
 
             # Reflect
+            direction_word = "LONG" if side == "buy" else "SHORT"
             self.db.add_memory(
                 "observation",
-                f"Strategist opened position: BUY ${amount_usd:.2f} {symbol} @ ${price:.4f}. "
+                f"Strategist opened {direction_word} position: {side.upper()} ${amount_usd:.2f} {symbol} @ ${price:.4f}. "
                 f"TP={self.config.default_tp_pct}% SL={self.config.default_sl_pct}%. "
                 f"Thesis: {decision.reasoning[:200]}",
-                tags=["strategist", "entry", symbol],
+                tags=["strategist", "entry", symbol, direction_word.lower()],
                 importance=4,
             )
 
-            logger.info(f"Strategist entry: BUY ${amount_usd:.2f} {symbol} @ ${price:.4f} orderId={order_id}")
+            logger.info(f"Strategist entry: {direction_word} ${amount_usd:.2f} {symbol} @ ${price:.4f} orderId={order_id}")
         except BitgetAPIError as e:
             logger.exception(f"Strategist entry failed (Bitget error): {e}")
         except Exception as e:
