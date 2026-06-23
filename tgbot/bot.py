@@ -141,9 +141,21 @@ def run_bot(token: Optional[str] = None):
     # Build the application
     app = Application.builder().token(token).build()
 
+    # Make the agent reachable from background tasks via app.bot_data
+    app.bot_data["agent"] = agent
+
     # Register the command list with Telegram so they show as clickable chips
     # in the chat UI (instead of having to type /command manually).
     async def _post_init(app):
+        # Start the background sync task that watches for trades the user
+        # closed manually in the Bitget app, or that got auto-closed by
+        # TP/SL. The task waits for the first user message to capture the
+        # chat_id, then runs every 60s and notifies the user on deltas.
+        try:
+            tracker = asyncio.create_task(_track_user(app))
+            app.bot_data["sync_tracker"] = tracker
+        except Exception as e:
+            logger.exception(f"Failed to start background sync tracker: {e}")
         from telegram import BotCommand
         commands = [
             BotCommand("start", "Àkànjí greeting"),
@@ -185,11 +197,96 @@ def run_bot(token: Optional[str] = None):
             BotCommand("kill", "activate kill switch"),
             BotCommand("release", "release kill switch"),
             BotCommand("settings", "adjust limits"),
+            BotCommand("sync", "sync journal with live Bitget (catches manual closes)"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("Telegram bot commands registered (clickable in chat UI)")
 
+    async def _post_shutdown(app):
+        # Cancel background sync job
+        sync_task = app.bot_data.get("sync_task")
+        if sync_task and not sync_task.done():
+            sync_task.cancel()
+            try:
+                await sync_task
+            except Exception:
+                pass
+        logger.info("Telegram bot shutdown: background tasks cancelled")
+
     app.post_init = _post_init
+    app.post_shutdown = _post_shutdown
+
+    async def _background_sync(app):
+        """Background task: every 60s, reconcile journal with live Bitget.
+
+        Catches trades the user closed in the Bitget app, or positions
+        that got auto-closed by TP/SL. Runs silently unless there are
+        deltas — then it sends a status message to the user.
+        """
+        from agent.core import AgentContext
+        sync_user_id = app.bot_data.get("user_id", "")
+        last_user_msg = {}  # chat_id -> last message id
+        # Find the most recent user chat_id from application
+        chat_id = app.bot_data.get("chat_id", "")
+        logger.info(f"Background sync started (interval=60s, chat_id={chat_id})")
+        try:
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    sync_agent = app.bot_data.get("agent")
+                    if not sync_agent:
+                        continue
+                    if not chat_id:
+                        continue
+                    # Build a synthetic /sync context
+                    ctx = AgentContext(
+                        user_id=sync_user_id,
+                        user_message="/sync",
+                        command="sync",
+                        args={},
+                    )
+                    response = await asyncio.to_thread(sync_agent.handle, ctx)
+                    # If response indicates work was done, send a heads-up
+                    if "Closed" in response and "No orphan" not in response:
+                        # Only notify if there were real closes
+                        if "Closed " in response and ("#1" in response or "#2" in response or
+                                                       "#3" in response or "#4" in response or
+                                                       "#5" in response):
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"🔄 *Auto-sync caught something:*\n\n{response}",
+                                    parse_mode="Markdown",
+                                )
+                            except Exception as e:
+                                logger.debug(f"Auto-sync notification failed: {e}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.exception(f"Background sync error: {e}")
+        except asyncio.CancelledError:
+            logger.info("Background sync cancelled")
+            raise
+
+    async def _track_user(app):
+        """Capture the user's chat_id on the first message so background sync
+        has a place to send notifications."""
+        chat_id = app.bot_data.get("chat_id", "")
+        # Already set if we re-entered
+        if chat_id:
+            return
+        # Wait for first message — update handler will populate chat_id
+        # We poll for it for up to 60s
+        for _ in range(60):
+            await asyncio.sleep(1)
+            if app.bot_data.get("chat_id"):
+                chat_id = app.bot_data["chat_id"]
+                # Start the background sync job
+                task = asyncio.create_task(_background_sync(app))
+                app.bot_data["sync_task"] = task
+                logger.info(f"User chat_id captured: {chat_id}. Background sync scheduled.")
+                return
+        logger.warning("No user chat_id captured in 60s. Background sync not started.")
 
     # -------------------------------------------------------------------------
     # Handlers
@@ -227,6 +324,13 @@ def run_bot(token: Optional[str] = None):
             return
         text = update.message.text
         cmd, args = parse_command_args(text)
+
+        # Capture chat_id for the background sync task (so it has somewhere
+        # to send "auto-sync caught something" notifications).
+        if update.effective_chat and update.effective_chat.id:
+            context.application.bot_data["chat_id"] = update.effective_chat.id
+        if update.effective_user and update.effective_user.id:
+            context.application.bot_data["user_id"] = str(update.effective_user.id)
 
         # Show 'typing...' indicator + a status message immediately
         await send_typing(update)
@@ -270,7 +374,14 @@ def run_bot(token: Optional[str] = None):
         else:
             await edit_status(status_msg, "🧠 Thinking…")
         try:
-            response = await asyncio.to_thread(agent.handle, ctx)
+            # /reflect /pick /agentic calls can take 30-90s (Qwen thinking + multiple tool calls)
+            response = await asyncio.wait_for(
+                asyncio.to_thread(agent.handle, ctx),
+                timeout=180.0,  # 3 minutes
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Agent timeout for cmd={cmd_name}")
+            response = "⏱️ That took too long. Qwen is thinking hard. Try /reflect with a smaller window (e.g. `days=3`) or run /review for a quick P&L summary."
         except Exception as e:
             logger.exception(f"Agent error: {e}")
             response = f"❌ Error: {e}"
@@ -317,7 +428,14 @@ def run_bot(token: Optional[str] = None):
         else:
             await edit_status(status_msg, "🧠 Asking Qwen…")
         try:
-            response = await asyncio.to_thread(agent.handle, ctx)
+            # /reflect /pick /agentic calls can take 30-90s (Qwen thinking + multiple tool calls)
+            response = await asyncio.wait_for(
+                asyncio.to_thread(agent.handle, ctx),
+                timeout=180.0,  # 3 minutes
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Agent timeout for cmd={cmd_name}")
+            response = "⏱️ That took too long. Qwen is thinking hard. Try /reflect with a smaller window (e.g. `days=3`) or run /review for a quick P&L summary."
         except Exception as e:
             logger.exception(f"Agent error: {e}")
             response = f"❌ Error: {e}"
