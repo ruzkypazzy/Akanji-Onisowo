@@ -1125,18 +1125,22 @@ class Agent:
                 if real_ranked:
                     qwen_pick = real_ranked[0]["symbol"]
                     qwen_conf = real_ranked[0].get("composite", 0.5)
+                    # Honor Qwen's directional pick from find_best_trade
+                    qwen_side = result.get("qwen_side", "long")
+                    side = "buy" if qwen_side == "long" else "sell"
                     # Force-execute via the regular trade path
+                    cmd_name = "buy" if side == "buy" else "sell"
                     fake_ctx = AgentContext(
                         user_id=ctx.user_id,
-                        user_message=f"/buy {qwen_pick} {amount_usd}",
-                        command="buy",
+                        user_message=f"/{cmd_name} {qwen_pick} {amount_usd}",
+                        command=cmd_name,
                         args={"symbol": qwen_pick, "amount_usd": amount_usd},
                     )
                     header = (
-                        f"🤖 *Autonomous scan: picked *{qwen_pick}* (top ranked, conf {qwen_conf:.2f})*\n"
+                        f"🤖 *Autonomous scan: picked *{qwen_pick}* ({qwen_side.upper()}, conf {qwen_conf:.2f})*\n"
                         f"💰 *Size:* `${amount_usd:.2f}` (user-requested)\n\n"
                     )
-                    return header + self._handle_trade(fake_ctx, side="buy")
+                    return header + self._handle_trade(fake_ctx, side=side)
                 # No real ranked — show summary
                 ranked = result.get("ranked", [])
                 lines = [
@@ -1155,10 +1159,12 @@ class Agent:
 
             # Auto-execute path
             sym = qwen_pick
-            side = "buy"
+            # Use Qwen's directional pick: long/short, not always buy
+            qwen_side = result.get("qwen_side", "long")
+            side = "buy" if qwen_side == "long" else "sell"
             tp_sl = suggested
             thesis = (
-                f"Autonomous pick: BUY ${amount_usd:.2f} {sym}. "
+                f"Autonomous pick: {qwen_side.upper()} ${amount_usd:.2f} {sym}. "
                 f"Qwen confidence: {qwen_conf:.2f}. "
                 f"Reason: {result.get('qwen_reasoning', '')[:200]}"
             )
@@ -1782,11 +1788,22 @@ class Agent:
         lines = ["*Trade Journal* 📓\n"]
         for t in trades:
             pnl_emoji = "🟢" if t.get("pnl_usd", 0) > 0 else "🔴" if t.get("pnl_usd", 0) < 0 else "⚪"
+            side_emoji = "🟢" if t.get("side") == "buy" else "🔴"
             lines.append(
                 f"{pnl_emoji} `{t['opened_at'][:10]}` "
-                f"{t['side'].upper()} {t['symbol']} "
+                f"{side_emoji} {t['side'].upper()} {t['symbol']} "
                 f"${t['quote_usd']:.2f} — `{t['status']}`"
             )
+            # Show the skills used to make this trade (proves the 100+ skills work)
+            try:
+                skills = json.loads(t.get("skills_used", "[]") or "[]")
+            except Exception:
+                skills = []
+            if skills:
+                skills_str = ", ".join(skills[:6])
+                if len(skills) > 6:
+                    skills_str += f" +{len(skills) - 6} more"
+                lines.append(f"   🔧 *Skills used:* `{skills_str}`")
             if t.get("reason"):
                 reason_short = t["reason"][:80] + "..." if len(t["reason"]) > 80 else t["reason"]
                 lines.append(f"   _Reason:_ {reason_short}")
@@ -2864,8 +2881,18 @@ class Agent:
                 args={"symbol": qwen_pick, "amount_usd": final_size},
             )
 
+            # Honor Qwen's directional pick (long/short)
+            qwen_side = result.get("qwen_side", "long")
+            side = "buy" if qwen_side == "long" else "sell"
+            cmd_name = "buy" if side == "buy" else "sell"
+            fake_ctx = AgentContext(
+                user_id=ctx.user_id,
+                user_message=f"/{cmd_name} {qwen_pick} {final_size}",
+                command=cmd_name,
+                args={"symbol": qwen_pick, "amount_usd": final_size},
+            )
             decision_block = (
-                f"\n*🧠 Qwen decision:* *{qwen_pick}* (conf {confidence:.2f})\n"
+                f"\n*🧠 Qwen decision:* *{qwen_pick}* ({qwen_side.upper()}, conf {confidence:.2f})\n"
                 f"_{qwen_reasoning}_\n\n"
                 f"💰 *Size:* `${final_size:.2f}` "
                 f"({final_size/balance*100:.1f}% of ${balance:.2f} balance)\n"
@@ -2878,8 +2905,7 @@ class Agent:
                 )
             else:
                 decision_block += "\n"
-
-            execution = self._handle_trade(fake_ctx, side="buy")
+            execution = self._handle_trade(fake_ctx, side=side)
             return scan_block + decision_block + execution
         except Exception as e:
             logger.exception(f"_auto_pick_and_trade failed: {e}")

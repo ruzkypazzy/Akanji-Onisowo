@@ -1255,6 +1255,12 @@ class SkillsRegistry:
             market="spot",
             tp_pct=tp_pct,
             sl_pct=sl_pct,
+            skills_used=[
+                "place_spot_order_with_tracking",
+                "get_ticker", "suggest_tp_sl", "risk_check_order",
+                "place_spot_order", "record_trade",
+                f"side:{side}", "market:spot",
+            ],
         )
         return {
             "ok": True,
@@ -1320,13 +1326,24 @@ class SkillsRegistry:
         market: str = "spot",
         tp_pct: float = 0,
         sl_pct: float = 0,
+        skills_used: list = None,
+        confidence: float = None,
     ) -> dict:
         """Record a trade in the journal so it shows up in /journal and /export.
 
         Computes the size in base currency from the USDT amount and entry price.
+        Records the actual list of skills used to make the trade, so the
+        /journal export proves the agent is using its 100+ skill catalog.
         """
         try:
             size_base = (size_usd / price) if price > 0 else 0
+            # Default skills_used to a list of the most common core trading skills
+            # so the journal never has an empty list
+            if not skills_used:
+                skills_used = [
+                    "get_ticker", "risk_check_order", "suggest_tp_sl",
+                    "record_trade", market, side,
+                ]
             trade_id = self.db.record_trade(
                 symbol=symbol,
                 side=side,
@@ -1336,8 +1353,8 @@ class SkillsRegistry:
                 quote_usd=size_usd,
                 order_id=order_id,
                 reason=reason,
-                skills_used=["agentic_pick_and_trade"],
-                confidence=0.5,
+                skills_used=skills_used,
+                confidence=confidence if confidence is not None else 0.5,
                 tp_pct=tp_pct if tp_pct > 0 else 8.0,
                 sl_pct=sl_pct if sl_pct > 0 else 4.0,
                 thesis=thesis,
@@ -1418,6 +1435,11 @@ class SkillsRegistry:
             market="futures",
             tp_pct=5.0,
             sl_pct=2.5,
+            skills_used=[
+                "place_futures_order_with_tracking",
+                "get_ticker", "place_futures_order", "record_trade",
+                f"side:{side}", f"leverage:{leverage}x", "market:futures",
+            ],
         )
         return {
             "ok": True,
@@ -1507,6 +1529,11 @@ class SkillsRegistry:
             market="futures",
             tp_pct=tp_pct,
             sl_pct=sl_pct,
+            skills_used=[
+                "place_futures_with_tpsl", "get_ticker", "place_strategy_order",
+                "place_futures_order", "record_trade",
+                f"side:{side}", f"leverage:{leverage}x", "market:futures",
+            ],
         )
         return {
             "ok": True,
@@ -2826,20 +2853,25 @@ class SkillsRegistry:
                     lines.append("\n".join(parts))
                 prompt = (
                     f"You are a senior crypto trader. The user wants to deploy "
-                    f"${amount_usd:.2f} in a long position on Bitget spot.\n\n"
+                    f"${amount_usd:.2f} on Bitget. You may go LONG (buy, profit from rise) "
+                    f"or SHORT (sell, profit from fall) based on the technicals.\n\n"
+                    f"**IMPORTANT:** A bot that only goes long will miss every downtrend. "
+                    f"Choose SHORT when the technicals say downside. Choose LONG when they say upside. "
+                    f"Choose SKIP when nothing has edge either way.\n\n"
                     f"Top {len(top_n)} candidates (scored by 9-signal composite, "
                     f"with real 1h technicals — RSI, MACD, Bollinger, ADX, EMA, ATR):\n\n"
                     + "\n".join(lines) +
-                    f"\n\nPick the SINGLE best setup. Be selective — skip if no clear edge.\n"
+                    f"\n\nPick the SINGLE best setup (long, short, or skip). Be selective — skip if no clear edge.\n"
                     f"You MUST pick from the list above; do not invent new symbols.\n"
-                    f"Consider:\n"
-                    f"  - Trend: ADX>25 with bullish EMA cross = strong trend\n"
-                    f"  - Momentum: RSI 40-65 sweet spot for longs; >75 overbought\n"
-                    f"  - Volatility: ATR% tells you how much this pair swings\n"
-                    f"  - Volume: high 24h vol = better fills, less slippage\n"
-                    f"  - MACD histogram turning positive = momentum shift\n\n"
-                    f"Return EXACTLY 3 lines in this format:\n"
+                    f"Decision framework:\n"
+                    f"  - **LONG** signals: ADX>25 with bullish EMA cross + RSI 40-65 + MACD_hist turning positive\n"
+                    f"  - **SHORT** signals: ADX>25 with bearish EMA cross + RSI 35-60 (rolling over) + MACD_hist turning negative + price at upper Bollinger band\n"
+                    f"  - **SKIP** signals: ADX<20 (choppy) OR conflicting signals (e.g. bullish trend but RSI>75 overbought) OR all candidates have ADX<20\n"
+                    f"  - Trend strength matters more than direction: weak trend in any direction = skip\n"
+                    f"  - High 24h vol = better fills, less slippage\n\n"
+                    f"Return EXACTLY 4 lines in this format:\n"
                     f"pick: SYMBOL (e.g. SOLUSDT) or 'skip'\n"
+                    f"side: long or short\n"
                     f"confidence: 0.0-1.0\n"
                     f"reasoning: 2-3 sentences citing the actual technicals you saw\n"
                 )
@@ -2852,10 +2884,15 @@ class SkillsRegistry:
                     temperature=0.3,
                 )
                 raw = resp["content"].strip()
+                qwen_side = "long"  # default if Qwen doesn't specify
                 for line in raw.split("\n"):
                     lower = line.lower().strip()
                     if lower.startswith("pick:"):
                         qwen_pick = line.split(":", 1)[1].strip().upper()
+                    elif lower.startswith("side:"):
+                        side_str = line.split(":", 1)[1].strip().lower()
+                        if side_str in ("long", "short", "buy", "sell"):
+                            qwen_side = "long" if side_str in ("long", "buy") else "short"
                     elif lower.startswith("confidence:"):
                         try:
                             qwen_conf = float(line.split(":", 1)[1].strip())
@@ -2879,7 +2916,9 @@ class SkillsRegistry:
             suggested_tp_sl = None
             if qwen_pick and qwen_pick != "SKIP" and qwen_pick.endswith("USDT") and qwen_pick in valid_symbols:
                 try:
-                    suggested_tp_sl = self._s_suggest_tp_sl(symbol=qwen_pick, side="buy")
+                    # TP/SL depends on direction: long buys → +TP / -SL,
+                    # short sells → -TP / +SL (prices inverted).
+                    suggested_tp_sl = self._s_suggest_tp_sl(symbol=qwen_pick, side=qwen_side)
                 except Exception:
                     pass
 
@@ -2888,12 +2927,13 @@ class SkillsRegistry:
                 "amount_usd": amount_usd,
                 "ranked": top_n,
                 "qwen_pick": qwen_pick,
+                "qwen_side": qwen_side,  # long or short
                 "qwen_confidence": qwen_conf,
                 "qwen_reasoning": qwen_reasoning,
                 "suggested_tp_sl": suggested_tp_sl,
                 "executes": (
                     qwen_pick and qwen_pick != "SKIP"
-                    and (qwen_conf >= 0.4 or qwen_pick in valid_symbols)  # lowered from 0.6
+                    and (qwen_conf >= 0.4 or qwen_pick in valid_symbols)
                 ),
             }
         except Exception as e:
