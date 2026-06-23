@@ -160,7 +160,9 @@ cp .env.example .env
 nano .env   # fill in 5 values (see below)
 
 # 4. Run the bot
-python main.py
+.venv/bin/python main.py
+# OR if you used `bash install.sh`, the systemd service is already running:
+sudo systemctl status akanji
 ```
 
 You need 6 env vars (5 required, 1 recommended):
@@ -223,7 +225,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 nano .env
-python main.py
+.venv/bin/python main.py
 ```
 
 ### systemd service (optional but recommended)
@@ -390,7 +392,7 @@ If you want to use Àkànjí with your own Bitget account:
 git clone https://github.com/ruzkypazzy/Akanji-Onisowo
 cd Akanji-Onisowo
 bash install.sh   # 5 minutes, prompts for 6 env vars
-python main.py
+.venv/bin/python main.py
 ```
 
 The installer creates a Python venv, installs deps, generates `.env` from your inputs, and sets up a systemd service. Your API keys stay on your machine — the bot only trades with them, never withdraws.
