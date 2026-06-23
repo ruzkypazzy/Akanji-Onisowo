@@ -453,8 +453,13 @@ class BitgetClient:
         # Try V3 (UTA) first, fall back to V2 for classic accounts
         try:
             # V3 unified endpoint REQUIRES 'category' field. V2 spot doesn't.
+            # V3 spot also needs 'qty' field (Bitget docs say 'size' but
+            # the live API rejects with "Parameter qty cannot be empty"
+            # if qty is missing). Send BOTH to be safe.
             v3_body = dict(body)
             v3_body["category"] = "spot"
+            if size is not None:
+                v3_body["qty"] = str(size)  # V3 spot uses 'qty' for amount
             return self._request("POST", "/api/v3/trade/place-order", body=v3_body)
         except BitgetAPIError as e:
             err = str(e)

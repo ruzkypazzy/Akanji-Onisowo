@@ -310,7 +310,8 @@ class Agent:
             "• `/analyze SYMBOL USDT` — deep analysis + bot's TP/SL\n"
             "• `/proceed` — execute the pending analysis\n"
             "• `/proceed SL 2 TP 6` — execute with custom SL/TP\n"
-            "• `/cancel ORDER_ID` — cancel a pending order\n\n"
+            "• `/cancel ORDER_ID` — cancel a pending order\n"
+            "• `/close` — list open positions, or `/close <id|SYMBOL|all>` to close\n\n"
             "*Automation:*\n"
             "• `/schedule daily 9am` — auto-pick every day at 9 AM UTC\n"
             "• `/schedule daily 9am spot` — daily spot only\n"
@@ -1604,6 +1605,174 @@ class Agent:
             "• `/settings reset` — back to defaults\n\n"
             "*Defaults:* 25% per trade, 75% per position, 30% drawdown kill switch, 30% daily loss, 5 positions."
         )
+
+    def _cmd_close(self, ctx: AgentContext) -> str:
+        """Close open positions.
+
+        Usage:
+          /close                — show all open positions + close-all button info
+          /close <id>           — close a specific trade by its journal id
+          /close all            — close every open trade (with confirmation)
+          /close SYMBOL         — close all positions for that symbol
+
+        Closing a position:
+          - Spot: places a market sell for the base amount
+          - Futures: places a market close-order on Bitget
+          - Updates the local journal with exit price + P&L
+        """
+        msg = (ctx.user_message or "").strip()
+        rest = re.sub(r"^/close\s*", "", msg, flags=re.IGNORECASE).strip()
+
+        # No args: show open positions
+        if not rest:
+            open_trades = self.db.get_open_trades()
+            if not open_trades:
+                return "📭 No open positions in journal to close."
+            lines = ["📋 *Open positions (close with `/close <id>`):*\n"]
+            for t in open_trades:
+                tid = t.get("id")
+                sym = t.get("symbol", "?")
+                side = t.get("side", "?")
+                order_type = t.get("order_type", "spot")
+                size_base = float(t.get("size", 0) or 0)
+                lines.append(f"  • `#{tid}` {side.upper()} {size_base:g} {sym} ({order_type})")
+            lines.append(
+                "\nUsage:\n"
+                "  `/close 3`        — close trade #3\n"
+                "  `/close all`      — close all open trades\n"
+                "  `/close SOLUSDT`  — close all SOL positions"
+            )
+            return "\n".join(lines)
+
+        # /close all — close everything
+        if rest.lower() in ("all", "*"):
+            open_trades = self.db.get_open_trades()
+            if not open_trades:
+                return "📭 No open positions to close."
+            closed = []
+            failed = []
+            for t in open_trades:
+                result = self._close_single_trade(t)
+                if result.get("ok"):
+                    closed.append(f"#{t['id']} {t['symbol']} P&L ${result.get('pnl_usd', 0):+.2f}")
+                else:
+                    failed.append(f"#{t['id']} {t['symbol']} ({result.get('error', '?')})")
+            msg = f"✅ Closed {len(closed)} position(s):\n"
+            for c in closed:
+                msg += f"  • {c}\n"
+            if failed:
+                msg += f"\n❌ Failed {len(failed)}:\n"
+                for f in failed:
+                    msg += f"  • {f}\n"
+            return msg
+
+        # /close <id> or /close SYMBOL
+        open_trades = self.db.get_open_trades()
+        # Try as numeric ID first
+        if rest.isdigit():
+            trade_id = int(rest)
+            target = next((t for t in open_trades if t.get("id") == trade_id), None)
+            if not target:
+                return f"❌ No open trade with id #{trade_id}. Use `/close` to list."
+            result = self._close_single_trade(target)
+            if result.get("ok"):
+                return (
+                    f"✅ Closed #{trade_id} {target['symbol']}\n"
+                    f"   Exit: ${result.get('exit_price', 0):.4f}\n"
+                    f"   P&L: ${result.get('pnl_usd', 0):+.2f} ({result.get('pnl_pct', 0):+.2f}%)"
+                )
+            return f"❌ Close failed: {result.get('error', '?')}"
+
+        # Try as symbol
+        sym = rest.upper()
+        if not sym.endswith("USDT"):
+            sym = sym + "USDT"
+        matching = [t for t in open_trades if t.get("symbol", "").upper() == sym]
+        if not matching:
+            return f"❌ No open position for {sym}. Use `/close` to list all."
+        closed = []
+        for t in matching:
+            result = self._close_single_trade(t)
+            if result.get("ok"):
+                closed.append(f"#{t['id']} P&L ${result.get('pnl_usd', 0):+.2f}")
+        if closed:
+            return f"✅ Closed {len(closed)} {sym} position(s):\n  • " + "\n  • ".join(closed)
+        return f"❌ Failed to close {sym} positions."
+
+    def _close_single_trade(self, trade: dict) -> dict:
+        """Close one trade: place market sell, update journal, return P&L."""
+        try:
+            symbol = trade.get("symbol", "")
+            side = trade.get("side", "")
+            order_type = trade.get("order_type", "spot")
+            size_base = float(trade.get("size", 0) or 0)
+            entry_price = float(trade.get("price", 0) or 0)
+            if size_base <= 0 or entry_price <= 0:
+                return {"ok": False, "error": "invalid trade data (size=0 or price=0)"}
+            # Get current price
+            try:
+                ticker = self.bitget.get_ticker(symbol)
+                if isinstance(ticker, list) and ticker:
+                    ticker = ticker[0]
+                current_price = float(
+                    ticker.get("lastPrice", ticker.get("lastPr", 0)) or 0
+                )
+            except Exception:
+                current_price = 0
+            if current_price <= 0:
+                return {"ok": False, "error": "could not fetch current price"}
+            # Place closing order
+            try:
+                if order_type == "futures":
+                    # For futures, place a market close-order
+                    close_side = "sell" if side == "buy" else "buy"
+                    order_result = self.bitget.place_futures_order(
+                        symbol=symbol,
+                        side=close_side,
+                        size=str(size_base),
+                        leverage=str(trade.get("leverage", 5)),
+                    )
+                else:
+                    # Spot: sell the base amount
+                    order_result = self.bitget.place_spot_order(
+                        symbol=symbol,
+                        side="sell",
+                        order_type="market",
+                        size=str(size_base),
+                    )
+            except Exception as e:
+                return {"ok": False, "error": f"order failed: {e}"}
+            # Check the order result
+            if isinstance(order_result, dict):
+                code = order_result.get("code", "00000")
+                if code not in ("00000", None):
+                    return {"ok": False, "error": f"Bitget: {order_result.get('msg', code)}"}
+            # Compute P&L
+            if side == "buy":
+                pnl_pct = (current_price - entry_price) / entry_price * 100
+            else:
+                pnl_pct = (entry_price - current_price) / entry_price * 100
+            notional = size_base * entry_price
+            pnl_usd = notional * (pnl_pct / 100)
+            # Update journal
+            try:
+                self.db.close_trade(
+                    trade_id=trade["id"],
+                    exit_price=current_price,
+                    pnl_usd=pnl_usd,
+                    pnl_pct=pnl_pct,
+                )
+            except Exception as e:
+                logger.warning(f"close_trade DB update failed: {e}")
+            return {
+                "ok": True,
+                "exit_price": current_price,
+                "pnl_pct": pnl_pct,
+                "pnl_usd": pnl_usd,
+            }
+        except Exception as e:
+            logger.exception(f"_close_single_trade failed: {e}")
+            return {"ok": False, "error": str(e)}
 
     def _cmd_journal(self, ctx: AgentContext) -> str:
         trades = self.db.get_recent_trades(limit=10)

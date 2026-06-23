@@ -85,6 +85,10 @@ def parse_command_args(text: str) -> tuple[str, dict]:
     if cmd == "price":
         return (cmd, {"symbol": rest.strip().upper() or "BTCUSDT"})
 
+    if cmd == "close":
+        # /close [id|all|SYMBOL]
+        return (cmd, {"raw_args": rest.strip()})
+
     if cmd == "schedule":
         # /schedule daily 9am futures
         # /schedule market spot
@@ -154,6 +158,7 @@ def run_bot(token: Optional[str] = None):
             BotCommand("analyze", "deep analysis + bot's TP/SL (semi-autonomous)"),
             BotCommand("proceed", "execute the pending analysis"),
             BotCommand("abort", "cancel a pending advisory or analysis"),
+            BotCommand("close", "close open positions (id, symbol, or all)"),
             BotCommand("autotrade", "autonomous mode: scan + pick + execute"),
             BotCommand("pick", "scan market, pick best trade (auto spot/futures by analysis)"),
             BotCommand("pickspot", "force spot trade (not futures)"),
