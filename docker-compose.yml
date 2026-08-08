@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  akanji:
+    build: .
+    container_name: okx-trading-asp
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No ports exposed — trading ASP doesn't serve HTTP
+    # All communication is outbound to OKX backend

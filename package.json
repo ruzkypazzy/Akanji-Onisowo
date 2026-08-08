@@ -1,0 +1,45 @@
+{
+  "name": "akanji-onisowo",
+  "version": "1.0.0",
+  "description": "Àkànjí Oníṣòwò — Autonomous trading agent for OKX.AI Trading Hackathon Season 1",
+  "type": "module",
+  "main": "dist/main.js",
+  "bin": {
+    "akanji": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "nodemailer": "^6.9.15",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.7.4",
+    "@types/nodemailer": "^6.4.16",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
+  },
+  "keywords": [
+    "trading",
+    "okx",
+    "agent",
+    "hackathon",
+    "x-layer",
+    "yoruba"
+  ],
+  "author": "ruzkypazzy",
+  "license": "MIT"
+}
