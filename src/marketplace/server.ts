@@ -453,8 +453,11 @@ async function main() {
     res.json({
       name: AGENT_NAME,
       description:
-        "Àkànjí Oníṣòwò — autonomous X Layer DEX trading agent. " +
-        "Disciplined risk-managed signals on-chain.",
+        "Àkànjí Oníṣòwò translates from Yoruba to 'Àkànjí the trader'. " +
+        "He is an autonomous X Layer DEX trading agent for the OKX.AI " +
+        "Trading Hackathon Season 1. He executes onchain spot trades with " +
+        "discipline: every position has a stop, every day has a loss limit, " +
+        "every loss has a ceiling. Subscribe to his live position feed.",
       url: PUBLIC_BASE_URL,
       version: "1.0.0",
       provider: {
@@ -473,9 +476,6 @@ async function main() {
         asset: USDT0_ADDRESS,
         payTo: RECEIVING_WALLET,
         facilitator: "https://web3.okx.com",
-        trialDays: TRIAL_DAYS,
-        priceUSDT: SUBSCRIPTION_PRICE_USDT,
-        periodDays: SUBSCRIPTION_PERIOD_DAYS,
       },
       defaultInputModes: ["application/json"],
       defaultOutputModes: ["application/json"],
@@ -484,18 +484,28 @@ async function main() {
           id: "live_position_feed",
           name: "live_position_feed",
           description:
-            "Get current open positions, daily PnL, and last signal. " +
-            `3 USDT/month, first ${TRIAL_DAYS} days free.`,
+            "Get current open positions, daily PnL, and last signal " +
+            "from Àkànjí Oníṣòwò.",
           tags: ["trading", "x-layer", "signal", "position", "okx"],
-          inputSchema: { type: "object", properties: {} },
-          pricing: {
-            amount: String(
-              Math.round(SUBSCRIPTION_PRICE_USDT * 1_000_000),
-            ),
-            asset: USDT0_ADDRESS,
-            network: NETWORK,
-            decimals: 6,
+          inputSchema: {
+            type: "object",
+            properties: {
+              wallet: {
+                type: "string",
+                description:
+                  "EVM wallet address on X Layer (0x...); used to track " +
+                  "your subscription and grant the free trial on first use.",
+              },
+            },
           },
+          examples: [
+            {
+              description: "Get the current position feed as JSON",
+              method: "GET",
+              url: `${PUBLIC_BASE_URL}/v1/position?wallet=0xce34cff4e4d54cfb8b1b5496ba9ff7a28c4ace2a`,
+              curl: `curl -X GET "${PUBLIC_BASE_URL}/v1/position?wallet=0xce34cff4e4d54cfb8b1b5496ba9ff7a28c4ace2a" -H "Accept: application/json"`,
+            },
+          ],
         },
       ],
     });
@@ -549,6 +559,12 @@ async function main() {
   });
 
   // /v1/position — main paid endpoint
+  // The x402 middleware has already verified the payment and attached the
+  // payer address to req.payer (via lastPayerByReqId map). If the request
+  // reached this handler, either:
+  //   (a) payment was verified (req.payer is set), OR
+  //   (b) x402 middleware already returned 402 with PAYMENT-REQUIRED header
+  //       and the route handler was not invoked.
   app.get("/v1/position", (req, res) => {
     const payer = (req as unknown as { payer: string }).payer || "";
     const wallet =
@@ -557,39 +573,40 @@ async function main() {
         (req.query.wallet as string) ||
         "");
 
-    // No wallet identified at all → 402 challenge (in case middleware didn't fire)
     if (!wallet) {
+      // Shouldn't happen — x402 middleware already returned 402. This is a
+      // defensive fallback only.
       res.status(402).json({
         error: "wallet_required",
-        message:
-          "Pass your wallet address as ?wallet=0x... or X-Wallet header for the free trial, " +
-          "or send a valid x402 payment receipt.",
-        trial_days: TRIAL_DAYS,
-        price_usdt: SUBSCRIPTION_PRICE_USDT,
+        message: "Send a valid x402 payment receipt to access this service.",
       });
       return;
     }
 
-    // If a wallet is identified but no payment yet, grant trial
+    // Paid request (or trial-with-wallet): record and return data
     if (!payer) {
+      // Wallet supplied without payment = trial mode
       const sub = ensureTrial(db, wallet);
-      if (!isActive(sub)) {
+      if (isActive(sub)) {
+        res.setHeader("X-Subscription-Trial", "true");
+        res.setHeader("X-Subscription-Expires-At", String(sub.expires_at));
+        db.prepare(
+          `INSERT INTO access_log (wallet, endpoint, status, is_trial, at)
+           VALUES (?, ?, 'trial', 1, ?)`,
+        ).run(wallet.toLowerCase(), req.path, Date.now());
+      } else {
+        // Trial expired, no payment. Return 402 to force a paid request.
+        // Note: this case shouldn't happen because x402 middleware would
+        // have already returned 402 with the challenge. The trial logic
+        // is a courtesy for first-time wallets.
         res.status(402).json({
           error: "trial_expired",
           message: `Your ${TRIAL_DAYS}-day free trial has ended. ` +
-            `Pay ${SUBSCRIPTION_PRICE_USDT} USDT to continue.`,
-          subscription_required: true,
+            `Send a valid x402 payment receipt (${SUBSCRIPTION_PRICE_USDT} USDT) to continue.`,
           price_usdt: SUBSCRIPTION_PRICE_USDT,
-          period_days: SUBSCRIPTION_PERIOD_DAYS,
         });
         return;
       }
-      res.setHeader("X-Subscription-Trial", "true");
-      res.setHeader("X-Subscription-Expires-At", String(sub.expires_at));
-      db.prepare(
-        `INSERT INTO access_log (wallet, endpoint, status, is_trial, at)
-         VALUES (?, ?, 'trial', 1, ?)`,
-      ).run(wallet.toLowerCase(), req.path, Date.now());
     }
 
     const state = readPositionState();
@@ -623,10 +640,10 @@ async function main() {
   app.post("/v1/subscribe", (req, res) => {
     const payer = (req as unknown as { payer: string }).payer || "";
     if (!payer) {
+      // Defensive: x402 middleware should have already returned 402.
       res.status(402).json({
         error: "payment_required",
         message: "Send a valid x402 payment receipt to subscribe.",
-        price_usdt: SUBSCRIPTION_PRICE_USDT,
       });
       return;
     }
