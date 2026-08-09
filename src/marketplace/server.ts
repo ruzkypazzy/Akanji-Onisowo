@@ -541,6 +541,7 @@ async function main() {
   // Read the payer that the onAfterSettle hook captured (if any) and
   // make it available to the route handler as req.payer.
   app.use(["/v1"], (req, res, next) => {
+    console.log(`[marketplace] /v1/* request: ${req.method} ${req.path} paymentHeader=${req.header("payment-signature") || "none"}`);
     const reqId = (req as unknown as { reqId: string }).reqId;
     const payer = payments.lastPayerByReqId.get(reqId) ?? "";
     (req as unknown as { payer: string }).payer = payer;
