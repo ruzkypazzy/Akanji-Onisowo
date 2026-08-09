@@ -16,14 +16,14 @@ function makeMarket(overrides: Partial<MarketData> = {}): MarketData {
 }
 
 describe('passesFilters — pre-trade safety', () => {
-  it('rejects liquidity below $10K', () => {
-    const r = passesFilters(makeMarket({ liquidityUSD: 9_999 }));
+  it('rejects liquidity below $25K', () => {
+    const r = passesFilters(makeMarket({ liquidityUSD: 24_999 }));
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/liquidity/);
   });
 
-  it('accepts liquidity exactly $10K', () => {
-    expect(passesFilters(makeMarket({ liquidityUSD: 10_000 })).ok).toBe(true);
+  it('accepts liquidity at $25K', () => {
+    expect(passesFilters(makeMarket({ liquidityUSD: 25_000 })).ok).toBe(true);
   });
 
   it('rejects token less than 1 day old', () => {
@@ -34,6 +34,21 @@ describe('passesFilters — pre-trade safety', () => {
 
   it('accepts token 1+ days old', () => {
     expect(passesFilters(makeMarket({ age: 1 })).ok).toBe(true);
+  });
+
+  it('rejects thin 24h volume (< $50K)', () => {
+    const r = passesFilters(makeMarket({ volume24h: 49_999 }));
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects crash (-50% in 24h)', () => {
+    const r = passesFilters(makeMarket({ priceChange24h: -0.51 }));
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects vertical pump (+200% in 24h)', () => {
+    const r = passesFilters(makeMarket({ priceChange24h: 2.1 }));
+    expect(r.ok).toBe(false);
   });
 
   it('accepts a healthy mature token', () => {

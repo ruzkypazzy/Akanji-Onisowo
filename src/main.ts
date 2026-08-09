@@ -22,6 +22,7 @@ import {
   closeTrade,
   insertTrade,
   upsertDailyPnL,
+  updateTradeState,
 } from './persistence/db.js';
 import { checkRiskLimits, calcDrawdown } from './risk/limits.js';
 import { evaluatePosition, calcPnL, onTP1Hit, shouldActivateTrailing } from './risk/stops.js';
@@ -78,12 +79,12 @@ async function tick(): Promise<void> {
       side: t.side as Side,
       entryPrice: t.entryPrice,
       sizeUSDT: t.sizeUSDT,
-      state: 'HOLDING',
+      state: (t.state === 'TP1_HIT' ? 'TP1_HIT' : 'HOLDING') as Position['state'],
       openTime: t.tsOpen,
-      stopLoss: t.entryPrice * (1 - tradingConfig.stopLossPct),
+      stopLoss: t.entryPrice * (1 - tradingConfig.stopLossPct),  // breakeven is overwritten after TP1
       takeProfit1: t.entryPrice * (1 + tradingConfig.takeProfit1Pct),
       takeProfit2: t.entryPrice * (1 + tradingConfig.takeProfit2Pct),
-      trailingStopActive: false,
+      trailingStopActive: t.trailingActive ?? false,
       signals: t.signals ?? {
         tokenAddress: t.token,
         whaleCount: 0,
@@ -122,17 +123,60 @@ async function tick(): Promise<void> {
       if (market.price === 0) continue;  // no data, skip
 
       const action = evaluatePosition(pos, market.price, Date.now());
+      const tradeRow = openTrades.find((t) => String(t.id) === pos.id);
+
       if (action.type === 'HOLD') {
         // Maybe activate trailing
         if (shouldActivateTrailing(pos, market.price) && !pos.trailingStopActive) {
+          if (tradeRow?.id) {
+            updateTradeState(tradeRow.id, { trailingActive: true });
+          }
           log.info('trailing stop activated', { token: pos.tokenAddress, pnlPct: calcPnL(pos, market.price).pnlPct });
         }
         continue;
       }
 
-      // Execute exit
+      // TP1 — partial close 50%, move SL to breakeven, activate trailing
+      if (action.type === 'CLOSE_TP1' && pos.state === 'HOLDING') {
+        const closeSize = pos.sizeUSDT / 2;
+        const pnlPct = calcPnL(pos, market.price).pnlPct;
+        const pnlUSDT = closeSize * pnlPct;
+
+        if (tradeRow?.id) {
+          updateTradeState(tradeRow.id, {
+            state: 'TP1_HIT',
+            trailingActive: true,
+            partialCloseSizeUSDT: closeSize,
+            partialClosePnLUSDT: pnlUSDT,
+            sizeUSDT: pos.sizeUSDT - closeSize,
+          });
+        }
+
+        logJournal({
+          ts: Date.now(),
+          tick: tickNumber,
+          action: 'tp1_partial',
+          token: pos.tokenAddress,
+          details: { closeSizeUSDT: closeSize, pnlUSDT, pnlPct, exitPrice: market.price, tradeId: tradeRow?.id },
+        });
+
+        await notifyTradeExit({
+          side: pos.side,
+          token: pos.tokenAddress,
+          tokenSymbol: pos.tokenSymbol,
+          sizeUSDT: closeSize,
+          entryPrice: pos.entryPrice,
+          exitPrice: market.price,
+          pnlUSDT,
+          pnlPct,
+          exitReason: 'TP1',
+          heldHours: (Date.now() - pos.openTime) / (1000 * 60 * 60),
+        });
+        continue;
+      }
+
+      // Full exit — TP2, SL, TRAIL, TIME
       const { pnlUSDT, pnlPct } = calcPnL(pos, market.price);
-      const tradeRow = openTrades.find((t) => String(t.id) === pos.id);
       if (tradeRow?.id) {
         closeTrade(tradeRow.id, {
           tsClose: Date.now(),

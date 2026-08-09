@@ -84,6 +84,10 @@ export interface Trade {
   pnlUSDT?: number;
   pnlPct?: number;
   exitReason?: ExitReason;
+  state?: string;                  // 'OPEN' | 'TP1_HIT' | 'CLOSED'
+  trailingActive?: boolean;
+  partialCloseSizeUSDT?: number;    // realized USDT from TP1 partial
+  partialClosePnLUSDT?: number;    // realized PnL from TP1 partial
   signals?: TokenSignals;
 }
 

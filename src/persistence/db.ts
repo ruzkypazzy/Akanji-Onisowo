@@ -48,6 +48,10 @@ function initSchema(db: Database.Database): void {
       pnl_usdt REAL,
       pnl_pct REAL,
       exit_reason TEXT,
+      state TEXT DEFAULT 'OPEN',
+      trailing_active INTEGER DEFAULT 0,
+      partial_close_size_usdt REAL DEFAULT 0,
+      partial_close_pnl_usdt REAL DEFAULT 0,
       signals JSON
     );
 
@@ -118,9 +122,33 @@ export function closeTrade(tradeId: number, close: {
   const db = getDb();
   db.prepare(`
     UPDATE trades
-    SET ts_close = ?, exit_price = ?, pnl_usdt = ?, pnl_pct = ?, exit_reason = ?
+    SET ts_close = ?, exit_price = ?, pnl_usdt = ?, pnl_pct = ?, exit_reason = ?, state = 'CLOSED'
     WHERE id = ?
   `).run(close.tsClose, close.exitPrice, close.pnlUSDT, close.pnlPct, close.exitReason, tradeId);
+}
+
+/**
+ * Update the in-flight state of a trade (state, trailing active, partial close).
+ * Used by main.ts when TP1 fires or trailing activates — without closing the row.
+ */
+export function updateTradeState(tradeId: number, update: {
+  state?: string;
+  trailingActive?: boolean;
+  partialCloseSizeUSDT?: number;
+  partialClosePnLUSDT?: number;
+  sizeUSDT?: number;
+}): void {
+  const db = getDb();
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (update.state !== undefined) { sets.push('state = ?'); vals.push(update.state); }
+  if (update.trailingActive !== undefined) { sets.push('trailing_active = ?'); vals.push(update.trailingActive ? 1 : 0); }
+  if (update.partialCloseSizeUSDT !== undefined) { sets.push('partial_close_size_usdt = ?'); vals.push(update.partialCloseSizeUSDT); }
+  if (update.partialClosePnLUSDT !== undefined) { sets.push('partial_close_pnl_usdt = ?'); vals.push(update.partialClosePnLUSDT); }
+  if (update.sizeUSDT !== undefined) { sets.push('size_usdt = ?'); vals.push(update.sizeUSDT); }
+  if (sets.length === 0) return;
+  vals.push(tradeId);
+  db.prepare(`UPDATE trades SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 }
 
 export function getOpenTrades(): Trade[] {
@@ -142,12 +170,13 @@ export function getTodayTrades(todayStr: string): Trade[] {
 export function getTodayRealizedPnL(todayStr: string): number {
   const db = getDb();
   const row = db.prepare(`
-    SELECT COALESCE(SUM(pnl_usdt), 0) as total
+    SELECT
+      COALESCE(SUM(CASE WHEN ts_close IS NOT NULL THEN pnl_usdt ELSE 0 END), 0) as closed_total,
+      COALESCE(SUM(partial_close_pnl_usdt), 0) as partial_total
     FROM trades
-    WHERE date(ts_close / 1000, 'unixepoch') = ?
-      AND ts_close IS NOT NULL
-  `).get(todayStr) as { total: number };
-  return row.total || 0;
+    WHERE date(ts_open / 1000, 'unixepoch') = ?
+  `).get(todayStr) as { closed_total: number; partial_total: number };
+  return (row.closed_total || 0) + (row.partial_total || 0);
 }
 
 export function recordHeartbeat(openPositions: number, capital: number, dailyPnL: number): void {
@@ -194,6 +223,10 @@ function rowToTrade(row: any): Trade {
     pnlUSDT: row.pnl_usdt ?? undefined,
     pnlPct: row.pnl_pct ?? undefined,
     exitReason: row.exit_reason ?? undefined,
+    state: row.state ?? undefined,
+    trailingActive: row.trailing_active ? true : false,
+    partialCloseSizeUSDT: row.partial_close_size_usdt ?? 0,
+    partialClosePnLUSDT: row.partial_close_pnl_usdt ?? 0,
     signals: row.signals ? JSON.parse(row.signals) : undefined,
   };
 }

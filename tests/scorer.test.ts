@@ -40,21 +40,21 @@ describe('scorer', () => {
     expect(s.recommendedSize).toBe(0);
   });
 
-  it('volume spike only = wait (score 1, no entry)', () => {
+  it('volume spike only = wait (score 1.5, no entry)', () => {
     const s = scoreSignals(makeSignals({ volumeSpike: true }));
-    expect(s.score).toBe(1);
+    expect(s.score).toBe(1.5);
     expect(s.recommendedSize).toBe(0);
   });
 
-  it('new pool alone = too risky (score 1, no entry)', () => {
+  it('new pool alone = too risky (score 0.5, no entry)', () => {
     const s = scoreSignals(makeSignals({ newPool: true }));
-    expect(s.score).toBe(1);
+    expect(s.score).toBe(0.5);
     expect(s.recommendedSize).toBe(0);
   });
 
-  it('4 signals = strong enter (size 20%)', () => {
+  it('4 strong signals = strong enter (size 20%)', () => {
     const s = scoreSignals(makeSignals({ whaleCount: 3, volumeSpike: true, priceUp: true, newPool: true }));
-    expect(s.score).toBe(5);
+    expect(s.score).toBe(4);
     expect(s.recommendedSize).toBe(0.20);
   });
 
@@ -64,13 +64,15 @@ describe('scorer', () => {
     expect(s.recommendedSize).toBe(0);
   });
 
-  it('1-2 whales is weaker than 3+ whales', () => {
+  it('1-2 whales is weaker than 5+ whales', () => {
     const a = scoreSignals(makeSignals({ whaleCount: 1 })).score;
     const b = scoreSignals(makeSignals({ whaleCount: 2 })).score;
     const c = scoreSignals(makeSignals({ whaleCount: 3 })).score;
-    expect(a).toBe(1);
-    expect(b).toBe(1);
-    expect(c).toBe(2);
+    const d = scoreSignals(makeSignals({ whaleCount: 5 })).score;
+    expect(a).toBe(0.5);
+    expect(b).toBe(0.5);
+    expect(c).toBe(1.5);
+    expect(d).toBe(2);
   });
 });
 
@@ -103,6 +105,21 @@ describe('passesFilters', () => {
 
   it('rejects very new tokens', () => {
     const r = passesFilters(makeMarket({ age: 0.5 }));
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects thin volume', () => {
+    const r = passesFilters(makeMarket({ volume24h: 10_000 }));
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects crash (24h drop > 50%)', () => {
+    const r = passesFilters(makeMarket({ priceChange24h: -0.6 }));
+    expect(r.ok).toBe(false);
+  });
+
+  it('rejects vertical pump (24h > 200%)', () => {
+    const r = passesFilters(makeMarket({ priceChange24h: 3.0 }));
     expect(r.ok).toBe(false);
   });
 
