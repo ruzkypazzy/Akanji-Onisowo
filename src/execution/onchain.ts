@@ -1,13 +1,16 @@
 /**
  * Onchain execution — thin wrapper around onchainos CLI.
  *
- * Real implementation will shell out to onchainos commands.
- * This is a stub for now — returns success without actually trading.
+ * In paper mode: validates inputs, simulates a fill, records the simulated
+ * tx hash. No actual onchain transaction occurs.
+ *
+ * In live mode: would shell out to onchainos swap / strategy create-limit.
  */
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { log } from '../logger.js';
+import { tradingConfig } from '../config.js';
 
 const execAsync = promisify(exec);
 
@@ -24,10 +27,29 @@ export async function swap(params: {
   amountUSDT: number;
   chain: string;
 }): Promise<SwapResult> {
-  log.info('swap: stub execution (paper mode)', params);
-  // TODO: replace with real onchainos call
-  //   onchainos swap --from <token> --to <token> --amount <usdt> --chain xlayer --force
-  return { ok: true, txHash: '0xstub_swap_' + Date.now() };
+  if (tradingConfig.tradingMode === 'paper') {
+    if (params.amountUSDT <= 0) {
+      return { ok: false, error: 'amountUSDT must be > 0' };
+    }
+    if (!params.toToken || params.toToken.length < 10) {
+      return { ok: false, error: 'invalid toToken address' };
+    }
+    log.info('paper swap: simulated fill', params);
+    return { ok: true, txHash: '0xpaper_' + Date.now().toString(16) };
+  }
+
+  // Live mode — would call onchainos swap
+  try {
+    const { stdout } = await execAsync(
+      `onchainos swap --from ${params.fromToken} --to ${params.toToken} --amount ${params.amountUSDT} --chain ${params.chain} --force 2>&1`,
+      { timeout: 30_000 }
+    );
+    const parsed = JSON.parse(stdout);
+    return { ok: true, txHash: parsed.data?.txHash ?? parsed.data?.orderId };
+  } catch (e) {
+    log.error('live swap failed', { error: String(e) });
+    return { ok: false, error: String(e) };
+  }
 }
 
 export async function placeStrategyOrder(params: {
@@ -37,21 +59,46 @@ export async function placeStrategyOrder(params: {
   amountUSDT: number;
   chain: string;
 }): Promise<SwapResult> {
-  log.info('placeStrategyOrder: stub execution (paper mode)', params);
-  // TODO: replace with real onchainos call
-  //   onchainos strategy create-limit --trigger-price <p> --direction <side> --amount <usdt>
-  return { ok: true, orderId: 'stub_strategy_' + Date.now() };
+  if (tradingConfig.tradingMode === 'paper') {
+    if (params.triggerPrice <= 0) {
+      return { ok: false, error: 'triggerPrice must be > 0' };
+    }
+    log.info('paper strategy order: simulated', params);
+    return { ok: true, orderId: 'paper_strat_' + Date.now().toString(16) };
+  }
+
+  // Live mode — would call onchainos strategy create-limit
+  try {
+    const { stdout } = await execAsync(
+      `onchainos strategy create-limit --token ${params.tokenAddress} --direction ${params.side} --trigger-price ${params.triggerPrice} --amount ${params.amountUSDT} --chain ${params.chain} 2>&1`,
+      { timeout: 30_000 }
+    );
+    const parsed = JSON.parse(stdout);
+    return { ok: true, orderId: parsed.data?.orderId };
+  } catch (e) {
+    log.error('live strategy order failed', { error: String(e) });
+    return { ok: false, error: String(e) };
+  }
 }
 
 export async function cancelStrategyOrder(orderId: string): Promise<boolean> {
-  log.info('cancelStrategyOrder: stub', { orderId });
-  return true;
+  if (tradingConfig.tradingMode === 'paper') return true;
+  try {
+    await execAsync(
+      `onchainos strategy cancel --order-id ${orderId} 2>&1`,
+      { timeout: 15_000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function getBalance(chain: string, tokenAddress: string): Promise<number> {
   try {
     const { stdout } = await execAsync(
-      `onchainos wallet balance --chain ${chain} 2>&1`
+      `onchainos wallet balance --chain ${chain} 2>&1`,
+      { timeout: 10_000 }
     );
     const parsed = JSON.parse(stdout);
     for (const detail of parsed.data?.details ?? []) {

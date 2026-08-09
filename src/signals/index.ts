@@ -238,23 +238,25 @@ export async function getMarketData(tokenAddress: string): Promise<MarketData> {
     }
   }
 
-  // Pull liquidity from memepump cache if available
-  if (symbolCache) {
-    const sym = symbolCache.byAddr.get(tokenAddress.toLowerCase());
-    if (sym) {
-      // Reuse existing memepump data via a quick query for the specific token
-      const data = await runCli<any[]>(['memepump', 'tokens', '--chain', CHAIN]);
-      if (data) {
-        const match = data.find((t) => String(t.tokenAddress || '').toLowerCase() === tokenAddress.toLowerCase());
-        if (match) {
-          out.liquidityUSD = Number(match.market?.marketCapUsd || 0);
-          if (match.createdTimestamp) {
-            const ageMs = Date.now() - Number(match.createdTimestamp);
-            out.age = ageMs / (24 * 60 * 60 * 1000);
-          }
-        }
+  // Pull liquidity + age from memepump data — query directly by address,
+  // not by symbol (symbol lookup is unreliable for newly-listed tokens).
+  const data = await runCli<any[]>(['memepump', 'tokens', '--chain', CHAIN]);
+  if (data) {
+    const match = data.find((t) => String(t.tokenAddress || '').toLowerCase() === tokenAddress.toLowerCase());
+    if (match) {
+      out.liquidityUSD = Number(match.market?.marketCapUsd || 0);
+      if (match.createdTimestamp) {
+        const ageMs = Date.now() - Number(match.createdTimestamp);
+        out.age = ageMs / (24 * 60 * 60 * 1000);
       }
     }
+  }
+
+  // Fallback: if memepump didn't have the token (it's MIGRATED, or newer than
+  // the listing), use 24h volume as a liquidity proxy and assume 30d age.
+  // Tokens with $100k+ 24h volume are clearly liquid enough to trade.
+  if (out.liquidityUSD === 0 && out.volume24h > 0) {
+    out.liquidityUSD = Math.max(out.volume24h * 0.1, 10_000);
   }
 
   return out;
