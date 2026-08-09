@@ -21,6 +21,14 @@ export interface TokenSignals {
   priceUp: boolean;         // >5% in last 15m
   newPool: boolean;         // recently launched
   socialBuzz: boolean;      // mention spike
+  /**
+   * Whale buys with timestamps (ms). Stale buys (older than `whaleRecencyMs`)
+   * do not count toward `whaleCount`. Used to detect "tail-end" entries where
+   * the move already happened.
+   */
+  recentWhaleBuys?: { ts: number; wallet: string }[];
+  /** Number of whale buys in the last `whaleRecencyMs` (default 15 min). */
+  recentWhaleCount?: number;
 }
 
 export interface TokenScore {
@@ -60,6 +68,13 @@ export interface MarketData {
   priceChange24h: number;  // as fraction, e.g. 0.05 = +5%
   liquidityUSD: number;
   age: number;              // days since launch
+  /**
+   * Highest close from the last N 1h bars (default 5). Used to detect
+   * entries at the top of a pump — see passesFilters + isNearRecentHigh.
+   */
+  recentHigh?: number;
+  /** Number of 1h bars used to compute recentHigh. */
+  recentHighWindow?: number;
 }
 
 export interface JournalEntry {

@@ -26,7 +26,7 @@ import {
 } from './persistence/db.js';
 import { checkRiskLimits, calcDrawdown } from './risk/limits.js';
 import { evaluatePosition, calcPnL, onTP1Hit, shouldActivateTrailing } from './risk/stops.js';
-import { scoreSignals, determineSide, passesFilters, computePositionSize } from './strategy/scorer.js';
+import { computePositionSize, evaluateEntry } from './strategy/scorer.js';
 import { gatherSignals, getMarketData, buildWatchlist } from './signals/index.js';
 import { swap, placeStrategyOrder, getBalance } from './execution/onchain.js';
 import {
@@ -241,17 +241,61 @@ async function tick(): Promise<void> {
         if (openPositions.some((p) => p.tokenAddress === tokenAddress)) continue;
 
         const market = await getMarketData(tokenAddress);
-        const filter = passesFilters(market);
-        if (!filter.ok) continue;
-
         const signals = await gatherSignals(tokenAddress);
-        const score = scoreSignals(signals);
-        if (score.score < 3) continue;
 
-        const side = determineSide(signals, market);
-        if ((side as string) === 'FLAT') continue;
+        // Use the structured evaluator — returns side + score + rejection reason
+        // so we can journal WHY an entry was skipped (post paper-test revision 0.1).
+        const ev = evaluateEntry(signals, market);
 
-        const sizeUSDT = computePositionSize(currentCapital, score.recommendedSize);
+        // Score threshold gate (separate from filter + side — kept explicit so
+        // "score too low" rejections are journaled distinctly from side rejections).
+        if (ev.score.score < 3) {
+          logJournal({
+            ts: Date.now(),
+            tick: tickNumber,
+            action: 'entry_rejected',
+            token: tokenAddress,
+            details: {
+              rejection_reason: 'score_too_low',
+              score: ev.score.score,
+              recommended_size: ev.score.recommendedSize,
+              whaleCount: signals.whaleCount,
+              recentWhaleCount: signals.recentWhaleCount,
+              volumeSpike: signals.volumeSpike,
+              priceUp: signals.priceUp,
+              newPool: signals.newPool,
+              socialBuzz: signals.socialBuzz,
+            },
+          });
+          continue;
+        }
+
+        // Journal the structured rejection (filter / side) so we can see over
+        // the next batch whether the new gates (volumeSpike, near-high) are
+        // actually cutting the bad-entry rate.
+        if (ev.rejection !== null) {
+          logJournal({
+            ts: Date.now(),
+            tick: tickNumber,
+            action: 'entry_rejected',
+            token: tokenAddress,
+            details: {
+              rejection_reason: ev.rejection,
+              side: ev.side,
+              ...(ev.rejectionDetails ?? {}),
+              whaleCount: signals.whaleCount,
+              recentWhaleCount: signals.recentWhaleCount,
+              volumeSpike: signals.volumeSpike,
+              priceUp: signals.priceUp,
+              recentHigh: market.recentHigh,
+              currentPrice: market.price,
+            },
+          });
+          continue;
+        }
+
+        const side = ev.side as 'LONG' | 'SHORT';
+        const sizeUSDT = computePositionSize(currentCapital, ev.score.recommendedSize);
         if (sizeUSDT === 0) continue;
 
         // Execute entry (paper mode for now)
@@ -316,7 +360,15 @@ async function tick(): Promise<void> {
           tick: tickNumber,
           action: 'entry',
           token: tokenAddress,
-          details: { side, sizeUSDT, price: market.price, sl, tp1, tp2, score: score.score, tradeId },
+          details: {
+            side, sizeUSDT, price: market.price, sl, tp1, tp2,
+            score: ev.score.score, tradeId,
+            whaleCount: signals.whaleCount,
+            recentWhaleCount: signals.recentWhaleCount,
+            volumeSpike: signals.volumeSpike,
+            priceUp: signals.priceUp,
+            recentHigh: market.recentHigh,
+          },
         });
 
         break;  // one entry per tick

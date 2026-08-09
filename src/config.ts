@@ -59,6 +59,14 @@ export interface TradingConfig {
   // Runtime
   logLevel: string;
   tickIntervalSeconds: number;
+
+  // Entry gating (post-paper-test revision 2026-08-09, +0.1)
+  /** Whales older than this many ms do not count as recent signals. Default 15 min. */
+  whaleRecencyMs: number;
+  /** Reject entry if current price >= (1 - this) * recentHigh. Default 0.02 = 2% below high. */
+  nearHighThresholdPct: number;
+  /** Number of 1h bars to look back for the recent-high calculation. */
+  nearHighWindowBars: number;
 }
 
 export interface WalletConfig {
@@ -102,6 +110,10 @@ export const tradingConfig: TradingConfig = {
 
   logLevel: envStr('LOG_LEVEL', 'info'),
   tickIntervalSeconds: envInt('TICK_INTERVAL_SECONDS', 30),
+
+  whaleRecencyMs: envInt('WHALE_RECENCY_MS', 15 * 60 * 1000),
+  nearHighThresholdPct: envFloat('NEAR_HIGH_THRESHOLD_PCT', 0.02),
+  nearHighWindowBars: envInt('NEAR_HIGH_WINDOW_BARS', 5),
 };
 
 export const walletConfig: WalletConfig = {

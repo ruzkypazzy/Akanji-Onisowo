@@ -27,14 +27,27 @@ function makeMarket(overrides: Partial<MarketData> = {}): MarketData {
   };
 }
 
-describe('determineSide — would have caught the SHORT bug', () => {
-  it('LONG: trend up + whales → LONG (not just defaulting to LONG)', () => {
-    expect(determineSide(makeSignals({ whaleCount: 3 }), makeMarket({ priceChange24h: 0.05 }))).toBe('LONG');
+describe('determineSide — entry-side signal gating (post 2026-08-09 paper loss)', () => {
+  it('LONG: trend up + whales + volumeSpike → LONG', () => {
+    expect(determineSide(
+      makeSignals({ whaleCount: 3, volumeSpike: true }),
+      makeMarket({ priceChange24h: 0.05 })
+    )).toBe('LONG');
+  });
+
+  it('LONG: trend up + whales WITHOUT volumeSpike → FLAT (the RTX/万事OK failure pattern)', () => {
+    // Post paper-test revision: whale-driven LONG requires volume confirmation.
+    // 16 whales + priceUp + no vol spike = the exact losing entry shape.
+    const side = determineSide(
+      makeSignals({ whaleCount: 16, priceUp: true }),
+      makeMarket({ priceChange24h: 0.05 })
+    );
+    expect(side).toBe('FLAT');
   });
 
   it('SHORT: trend down + whales + falling → SHORT (this is the bug Àkànjí had)', () => {
     const side = determineSide(makeSignals({ whaleCount: 3 }), makeMarket({ priceChange24h: -0.10 }));
-    expect(side).toBe('SHORT');  // not 'LONG' (the bug), not 'FLAT' (the other bug)
+    expect(side).toBe('SHORT');
   });
 
   it('SHORT: volume spike + falling price → SHORT', () => {
@@ -46,13 +59,11 @@ describe('determineSide — would have caught the SHORT bug', () => {
     expect(determineSide(makeSignals(), makeMarket())).toBe('FLAT');
   });
 
-  it('FLAT: conflicting signals (whales but flat price)', () => {
+  it('FLAT: conflicting signals (whales but flat price, no vol spike)', () => {
     expect(determineSide(makeSignals({ whaleCount: 3 }), makeMarket({ priceChange24h: 0 }))).toBe('FLAT');
   });
 
   it('SHORT signal at exactly -5% (boundary) → FLAT (needs >5% drop)', () => {
-    // At -5% exactly, the SHORT condition `trendDown = priceChange24h < -0.05` is false
-    // So it should be FLAT
     const side = determineSide(makeSignals({ whaleCount: 3 }), makeMarket({ priceChange24h: -0.05 }));
     expect(side).toBe('FLAT');
   });

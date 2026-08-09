@@ -54,4 +54,19 @@ describe('passesFilters — pre-trade safety', () => {
   it('accepts a healthy mature token', () => {
     expect(passesFilters(makeMarket()).ok).toBe(true);
   });
+
+  it('rejects price within 2% of recent high (pump top-out guard)', () => {
+    const r = passesFilters(makeMarket({ price: 0.99, recentHigh: 1.00 }));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/near recent high/);
+  });
+
+  it('accepts price more than 2% below recent high', () => {
+    expect(passesFilters(makeMarket({ price: 0.95, recentHigh: 1.00 })).ok).toBe(true);
+  });
+
+  it('accepts when recentHigh is missing (no data, no rejection)', () => {
+    // Fresh token without enough bars — don't block, just log
+    expect(passesFilters(makeMarket({ recentHigh: undefined })).ok).toBe(true);
+  });
 });

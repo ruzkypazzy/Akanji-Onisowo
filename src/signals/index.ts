@@ -6,7 +6,7 @@
  *   - Volume spike:      market kline (1h vs 24h average)
  *   - New pool:          memepump tokens (MIGRATED or NEW with liquidity)
  *   - Social buzz:       social news-by-symbol (mention volume in 24h)
- *   - Market data:       market kline (price, 24h change, volume)
+ *   - Market data:       market kline (price, 24h change, volume, recentHigh)
  *
  * All calls have 5s timeouts and fail-soft (return safe defaults) so
  * one bad data source can never block trading.
@@ -15,6 +15,8 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { TokenSignals, MarketData } from '../types.js';
+import { tradingConfig } from '../config.js';
+import { countRecentWhales } from '../strategy/scorer.js';
 
 const execFileP = promisify(execFile);
 const CLI = process.env.ONCHAINOS_BIN || '/root/.local/bin/onchainos';
@@ -40,17 +42,21 @@ async function runCli<T = any>(args: string[]): Promise<T | null> {
 }
 
 /**
- * Cache smart-money trades for the current tick to avoid re-querying per token.
- * Key: tokenAddress lowercased.
+ * Cache smart-money trades for the current tick.
+ * Stores timestamped buys per token (lowercased) so callers can apply their
+ * own recency window via `countRecentWhales()`.
  */
-let smartMoneyCache: { ts: number; byToken: Map<string, number> } | null = null;
+let smartMoneyCache: {
+  ts: number;
+  byToken: Map<string, { ts: number; wallet: string }[]>;
+} | null = null;
 const CACHE_TTL_MS = 60_000; // 1 minute
 
 /**
- * Count smart-money wallets that have bought a given token in the last hour.
- * Uses the onchainos tracker activities endpoint with --trade-type=1 (buy).
+ * Return the timestamped list of smart-money buys for a token (last 1 hour).
+ * Use `countRecentWhales()` to filter to a tighter recency window.
  */
-export async function checkWhaleActivity(tokenAddress: string): Promise<number> {
+export async function getWhaleBuys(tokenAddress: string): Promise<{ ts: number; wallet: string }[]> {
   const now = Date.now();
   if (!smartMoneyCache || now - smartMoneyCache.ts > CACHE_TTL_MS) {
     smartMoneyCache = { ts: now, byToken: new Map() };
@@ -66,12 +72,24 @@ export async function checkWhaleActivity(tokenAddress: string): Promise<number> 
       for (const t of data.trades) {
         if (Number(t.tradeTime) < cutoff) continue;
         const addr = String(t.tokenContractAddress || '').toLowerCase();
-        if (!addr) continue;
-        smartMoneyCache.byToken.set(addr, (smartMoneyCache.byToken.get(addr) || 0) + 1);
+        const wallet = String(t.walletAddress || '').toLowerCase();
+        if (!addr || !wallet) continue;
+        const list = smartMoneyCache.byToken.get(addr) || [];
+        list.push({ ts: Number(t.tradeTime), wallet });
+        smartMoneyCache.byToken.set(addr, list);
       }
     }
   }
-  return smartMoneyCache.byToken.get(tokenAddress.toLowerCase()) || 0;
+  return smartMoneyCache.byToken.get(tokenAddress.toLowerCase()) || [];
+}
+
+/**
+ * Count smart-money wallets that bought this token within the recency window
+ * (default 15 min, configurable via `tradingConfig.whaleRecencyMs`).
+ */
+export async function checkWhaleActivity(tokenAddress: string): Promise<number> {
+  const buys = await getWhaleBuys(tokenAddress);
+  return countRecentWhales(buys).recentCount;
 }
 
 /**
@@ -168,15 +186,20 @@ export async function checkSocialBuzz(tokenAddress: string): Promise<boolean> {
 /**
  * Gather all signals for a single token.
  * Runs the four checks in parallel — each fails soft independently.
+ * `whaleCount` is the count within the recency window (default 15 min),
+ * not the full 1-hour lookback. The full list is in `recentWhaleBuys`
+ * for journaling + diagnostics.
  */
 export async function gatherSignals(tokenAddress: string): Promise<TokenSignals> {
-  const [whaleCount, volumeSpike, newPool, socialBuzz, symbol] = await Promise.all([
-    checkWhaleActivity(tokenAddress),
+  const [whaleBuys, volumeSpike, newPool, socialBuzz, symbol] = await Promise.all([
+    getWhaleBuys(tokenAddress),
     checkVolumeSpike(tokenAddress),
     checkNewPool(tokenAddress),
     checkSocialBuzz(tokenAddress),
     getTokenSymbol(tokenAddress),
   ]);
+
+  const { recentCount, recentBuys } = countRecentWhales(whaleBuys);
 
   // priceUp: latest 1h bar close > 1h-prior close by >= 2% (proxy for short-term momentum)
   let priceUp = false;
@@ -196,11 +219,13 @@ export async function gatherSignals(tokenAddress: string): Promise<TokenSignals>
   return {
     tokenAddress,
     tokenSymbol: symbol || undefined,
-    whaleCount,
+    whaleCount: recentCount,
     volumeSpike,
     priceUp,
     newPool,
     socialBuzz,
+    recentWhaleBuys: recentBuys,
+    recentWhaleCount: recentCount,
   };
 }
 
@@ -208,6 +233,9 @@ export async function gatherSignals(tokenAddress: string): Promise<TokenSignals>
  * Get market data for a token.
  * Uses market kline (last 24h close + 24h change + 24h volume) and
  * tracker liquidity from memepump if available.
+ *
+ * Also populates `recentHigh` from the highest close of the last N 1h bars
+ * (default 5) — used by `passesFilters` to reject entries at the top of a pump.
  */
 export async function getMarketData(tokenAddress: string): Promise<MarketData> {
   const out: MarketData = {
@@ -218,6 +246,8 @@ export async function getMarketData(tokenAddress: string): Promise<MarketData> {
     priceChange24h: 0,
     liquidityUSD: 0,
     age: 30,
+    recentHigh: undefined,
+    recentHighWindow: tradingConfig.nearHighWindowBars,
   };
 
   const bars = await runCli<any[]>([
@@ -235,6 +265,19 @@ export async function getMarketData(tokenAddress: string): Promise<MarketData> {
       const now = Number(bars[0].c);
       const yesterday = Number(bars[23].c);
       if (yesterday > 0) out.priceChange24h = (now - yesterday) / yesterday;
+    }
+    // recentHigh: max close in the last N bars (default 5) — used for the
+    // near-high entry filter. We exclude bar[0] (current) because the live
+    // tick fires mid-bar; the most recent closed bar is bar[1].
+    const window = tradingConfig.nearHighWindowBars;
+    const sample = bars.slice(1, window + 1);
+    if (sample.length > 0) {
+      let hi = 0;
+      for (const b of sample) {
+        const c = Number(b.c) || 0;
+        if (c > hi) hi = c;
+      }
+      if (hi > 0) out.recentHigh = hi;
     }
   }
 
