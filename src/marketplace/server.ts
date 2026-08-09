@@ -527,21 +527,24 @@ async function main() {
   // Attach a stable request id so the onAfterSettle hook can attach the
   // payer address to the right request, since Express's req object doesn't
   // survive the async settlement roundtrip.
-  app.use(["/v1"], (req, _res, next) => {
+  const attachReqId = (
+    req: import("express").Request,
+    _res: import("express").Response,
+    next: import("express").NextFunction,
+  ) => {
     (req as unknown as { reqId: string }).reqId = `req-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
     next();
-  });
-
-  // Apply x402 protection. /health and /.well-known/agent.json are NOT
-  // registered in the RoutesConfig so they remain free.
-  app.use(["/v1"], payments.middleware);
+  };
 
   // Read the payer that the onAfterSettle hook captured (if any) and
   // make it available to the route handler as req.payer.
-  app.use(["/v1"], (req, res, next) => {
-    console.log(`[marketplace] /v1/* request: ${req.method} ${req.path} paymentHeader=${req.header("payment-signature") || "none"}`);
+  const attachPayer = (
+    req: import("express").Request,
+    res: import("express").Response,
+    next: import("express").NextFunction,
+  ) => {
     const reqId = (req as unknown as { reqId: string }).reqId;
     const payer = payments.lastPayerByReqId.get(reqId) ?? "";
     (req as unknown as { payer: string }).payer = payer;
@@ -557,7 +560,7 @@ async function main() {
       ).run(payer.toLowerCase(), req.path, Date.now());
     }
     next();
-  });
+  };
 
   // /v1/position — main paid endpoint
   // The x402 middleware has already verified the payment and attached the
@@ -566,7 +569,12 @@ async function main() {
   //   (a) payment was verified (req.payer is set), OR
   //   (b) x402 middleware already returned 402 with PAYMENT-REQUIRED header
   //       and the route handler was not invoked.
-  app.get("/v1/position", (req, res) => {
+  app.get(
+    "/v1/position",
+    attachReqId,
+    payments.middleware,
+    attachPayer,
+    (req, res) => {
     const payer = (req as unknown as { payer: string }).payer || "";
     const wallet =
       payer ||
@@ -635,10 +643,16 @@ async function main() {
         "Data is read-only. Use POST /v1/subscribe to extend your subscription. " +
         "Subscriptions are managed by the ASP and recorded on X Layer via x402.",
     });
-  });
+  },
+  );
 
   // /v1/subscribe — explicit subscription renewal endpoint
-  app.post("/v1/subscribe", (req, res) => {
+  app.post(
+    "/v1/subscribe",
+    attachReqId,
+    payments.middleware,
+    attachPayer,
+    (req, res) => {
     const payer = (req as unknown as { payer: string }).payer || "";
     if (!payer) {
       // Defensive: x402 middleware should have already returned 402.
@@ -660,7 +674,8 @@ async function main() {
         Math.ceil((sub.expires_at - Date.now()) / (24 * 60 * 60 * 1000)),
       ),
     });
-  });
+  },
+  );
 
   // Generic 404
   app.use((_req, res) => {
