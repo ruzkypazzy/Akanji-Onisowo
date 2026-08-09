@@ -26,7 +26,7 @@ import {
 import { checkRiskLimits, calcDrawdown } from './risk/limits.js';
 import { evaluatePosition, calcPnL, onTP1Hit, shouldActivateTrailing } from './risk/stops.js';
 import { scoreSignals, determineSide, passesFilters, computePositionSize } from './strategy/scorer.js';
-import { gatherSignals, getMarketData } from './signals/index.js';
+import { gatherSignals, getMarketData, buildWatchlist } from './signals/index.js';
 import { swap, placeStrategyOrder, getBalance } from './execution/onchain.js';
 import {
   notifyTradeEntry,
@@ -180,9 +180,18 @@ async function tick(): Promise<void> {
       logJournal({ ts: Date.now(), tick: tickNumber, action: 'risk_blocked', details: { reason: risk.reason } });
     } else {
       // 7. Try to enter a new position
-      // For v1: scan the existing open position list + a small hardcoded watchlist
-      const watchlist = openPositions.map((p) => p.tokenAddress);
-      // (In real impl, would pull from onchainos memepump + leaderboard + market data)
+      // Build watchlist: tokens with recent smart-money buys on X Layer
+      const heldAddresses = new Set(openPositions.map((p) => p.tokenAddress.toLowerCase()));
+      const watchlist = (await buildWatchlist())
+        .filter((addr) => !heldAddresses.has(addr.toLowerCase()));
+      if (watchlist.length === 0) {
+        logJournal({
+          ts: Date.now(),
+          tick: tickNumber,
+          action: 'no_signals',
+          details: { reason: 'empty watchlist from smart-money tracker' },
+        });
+      }
 
       for (const tokenAddress of watchlist) {
         if (openPositions.some((p) => p.tokenAddress === tokenAddress)) continue;
