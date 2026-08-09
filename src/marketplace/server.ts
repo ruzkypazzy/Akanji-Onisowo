@@ -4,7 +4,7 @@
  * Exposes a subscription-based signal feed to the OKX.AI marketplace.
  *
  * Architecture:
- *   - x402-paywalled `GET /v1/position` endpoint (3 USDT/month)
+ *   - x402-paywalled `GET /v1/position` endpoint (subscription-gated)
  *   - First 3 days free for every new wallet (no payment required)
  *   - SQLite-backed subscription state (wallet → start, expiry, paid status)
  *   - Free `/health` and `/.well-known/agent.json` endpoints
@@ -398,14 +398,16 @@ function buildPaymentLayer(db: Database.Database): PaymentLayer {
     "GET /v1/position": {
       accepts,
       description:
-        `${AGENT_NAME}: live X Layer DEX position feed (3 USDT/mo, 3-day free trial). ` +
-        `Returns current open positions, daily PnL, last signal, and trading mode.`,
+        `${AGENT_NAME}: live read-only X Layer DEX position feed. ` +
+        `Returns open positions, daily PnL, last signal, and trading mode as JSON. ` +
+        `Subscription-gated via x402 v2 on eip155:196.`,
       mimeType: "application/json",
     },
     "POST /v1/subscribe": {
       accepts,
       description:
-        `${AGENT_NAME}: pay subscription to extend access by 30 days.`,
+        `${AGENT_NAME}: extend active subscription by 30 days. ` +
+        `Idempotent — returns current subscriber state.`,
       mimeType: "application/json",
     },
   });
