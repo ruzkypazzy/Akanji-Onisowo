@@ -545,6 +545,7 @@ async function main() {
     res: import("express").Response,
     next: import("express").NextFunction,
   ) => {
+    console.log(`[marketplace] attachPayer: req.path=${req.path}`);
     const reqId = (req as unknown as { reqId: string }).reqId;
     const payer = payments.lastPayerByReqId.get(reqId) ?? "";
     (req as unknown as { payer: string }).payer = payer;
@@ -571,6 +572,10 @@ async function main() {
   //       and the route handler was not invoked.
   app.get(
     "/v1/position",
+    (req, res, next) => {
+      console.log(`[marketplace] /v1/position HANDLER: req.path=${req.path} req.url=${req.url} req.originalUrl=${req.originalUrl} paymentHeader=${req.header("payment-signature") || "none"}`);
+      next();
+    },
     attachReqId,
     payments.middleware,
     attachPayer,
