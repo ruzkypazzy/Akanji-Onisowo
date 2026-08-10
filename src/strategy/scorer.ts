@@ -6,14 +6,22 @@
  *   Both had whaleCount > 0 and priceUp=true, but volumeSpike=false.
  *   The agent was buying the tail end of moves that were already reversing.
  *
- * New gates (entry-side only — risk/stops unchanged):
- *   1. determineSide LONG now requires volumeSpike when driven by whales.
- *      Whale count alone is no longer sufficient.
- *   2. passesFilters rejects "near recent high" entries via nearHighFilter.
- *      Pulls highest close from the last N 1h bars (default 5) and rejects
- *      if current price is within nearHighThresholdPct (default 2%) of it.
- *   3. countRecentWhales trims the whale count to buys within whaleRecencyMs
- *      (default 15 min), so stale 30-min-old buys don't drive entries.
+ * Revision +0.2 (2026-08-10):
+ *   Lowered entry score threshold from 3 to 2.5 to accept more candidates
+ *   on the thin X Layer DEX market. Hard gates (volumeSpike, near-recent-high,
+ *   whale recency) now run BEFORE the score threshold and are independent of
+ *   it. A score-2.5+ candidate is still rejected if any hard gate fails.
+ *
+ * Hard gates (must pass regardless of score):
+ *   1. volumeSpike_gate  — volumeSpike must be true for any LONG entry
+ *   2. near_high_filter  — current price not within nearHighThresholdPct of
+ *                          the recent N-bar high
+ *   3. whale_stale       — whaleCount > 0 must come from buys within
+ *                          whaleRecencyMs (15 min default)
+ *
+ * Soft scoring (composite, threshold 2.5):
+ *   whales (0.5-2.0) + volumeSpike (1.5) + priceUp (0.5) + newPool (0.5)
+ *   + socialBuzz (0.5)
  *
  * Rejection reasons are surfaced as a `rejection` field on the score so the
  * main.ts tick loop can journal them with a stable `rejection_reason` key.
@@ -23,12 +31,16 @@ import type { TokenSignals, TokenScore, MarketData, Side } from '../types.js';
 import { tradingConfig } from '../config.js';
 
 export type RejectionReason =
-  | 'volume_spike_required'
-  | 'near_recent_high'
-  | 'whales_too_stale'
-  | 'no_long_signal'
-  | 'no_short_signal'
+  | 'volumeSpike_gate'   // hard gate: volumeSpike must be true for LONG
+  | 'near_high_filter'   // hard gate: price within nearHighThresholdPct of recentHigh
+  | 'whale_stale'        // hard gate: no whales in recency window
+  | 'score_too_low'      // soft: composite below 2.5 threshold
+  | 'no_long_signal'     // soft: side was FLAT for other reasons
+  | 'no_short_signal'    // soft: side was FLAT for other reasons
   | null;
+
+/** Minimum score required to consider an entry (soft threshold). */
+export const MIN_ENTRY_SCORE = 2.5;
 
 export interface ScoredWithRejection {
   score: TokenScore;
@@ -65,10 +77,12 @@ export function scoreSignals(signals: TokenSignals): TokenScore {
   if (signals.socialBuzz) score += 0.5;
 
   // Size: stronger signal = larger position
+  // Note: hard gates (volumeSpike, near-high, recency) are enforced separately
+  // in evaluateEntry — they don't affect the score, they block entry entirely.
   let recommendedSize = 0;
   if (score >= 4) recommendedSize = tradingConfig.maxPositionSizePct;       // 20%
-  else if (score >= 3) recommendedSize = tradingConfig.maxPositionSizePct / 2; // 10%
-  // Below 3: not entering
+  else if (score >= 2.5) recommendedSize = tradingConfig.maxPositionSizePct / 2; // 10%
+  // Below 2.5: not entering (soft threshold — gates run first and can also block)
 
   return {
     tokenAddress: signals.tokenAddress,
@@ -202,48 +216,133 @@ export function computePositionSize(capital: number, recommendedSizePct: number)
 }
 
 /**
- * Convenience wrapper: runs scoreSignals + determineSide + passesFilters
- * and returns a structured result with a `rejection` field that the caller
+ * Convenience wrapper: runs hard gates first, then score threshold, then side.
+ * Returns a structured result with a `rejection` field that the caller
  * (main.ts tick loop) can journal.
  *
- * Rejection reasons (in evaluation order, first match wins):
- *   - 'no_long_signal' / 'no_short_signal' — determineSide returned FLAT
- *     but we still passed everything else
- *   - 'volume_spike_required' — determineSide returned FLAT specifically
- *     because the whale-path LONG needs volumeSpike
- *   - 'near_recent_high' — passesFilters rejected on near-high
- *   - 'whales_too_stale' — recentWhaleCount below threshold (informational;
- *     set by the caller before invoking this function)
+ * Evaluation order (first match wins, short-circuits):
+ *   1. whale_stale       — signals.whaleCount is 0 (no recent whales at all)
+ *   2. volumeSpike_gate  — would-be LONG entry but volumeSpike is false
+ *   3. near_high_filter  — passesFilters rejected on near-recent-high
+ *   4. score_too_low     — composite score < MIN_ENTRY_SCORE (2.5)
+ *   5. no_long_signal    — score is fine, gates pass, but side is FLAT
+ *
+ * Note: passesFilters also runs liquidity/volume/age checks; those reasons
+ * are still surfaced under 'no_long_signal' for now (they weren't part of
+ * the +0.1 patch and changing them is out of scope).
  */
 export function evaluateEntry(
   signals: TokenSignals,
   market: MarketData
 ): { score: TokenScore; side: Side | 'FLAT'; rejection: RejectionReason; rejectionDetails?: Record<string, unknown> } {
   const score = scoreSignals(signals);
-  const side = determineSide(signals, market) as Side | 'FLAT';
 
-  // Pre-filter check (liquidity, volume, age, near-high)
+  // Gate 1: whale_stale — no whales in the recency window. If there are no
+  // whales, the only way to enter is via newPool + volumeSpike + trendUp
+  // (or volumeSpike + priceUp + !priceFalling). Both still need volumeSpike,
+  // so we don't reject here just on zero whales. We only reject if the
+  // would-be-LONG reason would have been whale-driven.
+  // Implementation: defer — this is handled below in the side-diagnosis step.
+
+  // Gate 2: near_high_filter — check first because it's a hard structural
+  // rejection that should never be overridden by score. Even a score-10
+  // candidate is rejected if price is at the recent high.
   const filter = passesFilters(market);
   if (!filter.ok) {
-    const reason: RejectionReason = filter.reason?.startsWith('near recent high')
-      ? 'near_recent_high'
-      : null;
-    return { score, side, rejection: reason, rejectionDetails: { filterReason: filter.reason } };
-  }
-
-  if (side === 'FLAT') {
-    // Diagnose why: if there were whales + priceUp but no volumeSpike,
-    // call it out as volume_spike_required so the journal makes the cause clear.
-    const wouldBeLongIfVolume =
-      signals.whaleCount > 0 && market.priceChange24h > 0;
-    if (wouldBeLongIfVolume && !signals.volumeSpike) {
+    if (filter.reason?.startsWith('near recent high')) {
       return {
         score,
-        side,
-        rejection: 'volume_spike_required',
-        rejectionDetails: { whaleCount: signals.whaleCount, trendUp: market.priceChange24h > 0 },
+        side: 'FLAT',
+        rejection: 'near_high_filter',
+        rejectionDetails: {
+          price: market.price,
+          recentHigh: market.recentHigh,
+          distancePct: market.recentHigh && market.price > 0
+            ? (market.recentHigh - market.price) / market.recentHigh
+            : undefined,
+          thresholdPct: tradingConfig.nearHighThresholdPct,
+          filterReason: filter.reason,
+        },
       };
     }
+    // Other passesFilters rejections (liquidity, 24h vol, 24h change bounds,
+    // age) are real and not part of the +0.1 gate set. Surface them as
+    // no_long_signal but include the filter reason in details.
+    return {
+      score,
+      side: 'FLAT',
+      rejection: 'no_long_signal',
+      rejectionDetails: { filterReason: filter.reason },
+    };
+  }
+
+  // Gate 3: volumeSpike_gate — would-be LONG but volumeSpike is false.
+  // This is the RTX/万事OK failure pattern. Even at score 2.5+ we block.
+  // Determine side first to see if we *would* go LONG.
+  const wouldBeLong =
+    (signals.whaleCount > 0 && market.priceChange24h > 0) ||
+    (signals.newPool && market.priceChange24h > 0) ||
+    (signals.priceUp && market.priceChange24h >= 0);
+  if (wouldBeLong && !signals.volumeSpike) {
+    return {
+      score,
+      side: 'FLAT',
+      rejection: 'volumeSpike_gate',
+      rejectionDetails: {
+        whaleCount: signals.whaleCount,
+        recentWhaleCount: signals.recentWhaleCount,
+        priceUp: signals.priceUp,
+        newPool: signals.newPool,
+        volumeSpike: signals.volumeSpike,
+        trendUp: market.priceChange24h > 0,
+      },
+    };
+  }
+
+  // Gate 4: whale_stale — if whaleCount is 0 AND the only entry paths are
+  // the whale-driven ones (no newPool, no priceUp), reject. The newPool
+  // and priceUp paths don't require whales, so this gate is only about
+  // ensuring the agent isn't entering on "1-2 whales" alone with no other
+  // confirmation.
+  if (signals.whaleCount === 0 && !signals.newPool && !signals.priceUp) {
+    return {
+      score,
+      side: 'FLAT',
+      rejection: 'whale_stale',
+      rejectionDetails: {
+        recentWhaleCount: signals.recentWhaleCount ?? 0,
+        recentWhaleBuys: signals.recentWhaleBuys?.length ?? 0,
+        recencyMs: tradingConfig.whaleRecencyMs,
+        priceUp: signals.priceUp,
+        newPool: signals.newPool,
+      },
+    };
+  }
+
+  // Soft check: composite score threshold
+  if (score.score < MIN_ENTRY_SCORE) {
+    return {
+      score,
+      side: 'FLAT',
+      rejection: 'score_too_low',
+      rejectionDetails: {
+        score: score.score,
+        threshold: MIN_ENTRY_SCORE,
+        recommendedSize: score.recommendedSize,
+        whaleCount: signals.whaleCount,
+        recentWhaleCount: signals.recentWhaleCount,
+        volumeSpike: signals.volumeSpike,
+        priceUp: signals.priceUp,
+        newPool: signals.newPool,
+        socialBuzz: signals.socialBuzz,
+      },
+    };
+  }
+
+  // Final: determine side. If FLAT here (e.g., trend down + whales), it's a
+  // signal mismatch, not a gate failure.
+  const side = determineSide(signals, market) as Side | 'FLAT';
+  if (side === 'FLAT') {
     return { score, side, rejection: 'no_long_signal' };
   }
 

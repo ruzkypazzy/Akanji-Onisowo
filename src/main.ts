@@ -243,36 +243,18 @@ async function tick(): Promise<void> {
         const market = await getMarketData(tokenAddress);
         const signals = await gatherSignals(tokenAddress);
 
-        // Use the structured evaluator — returns side + score + rejection reason
-        // so we can journal WHY an entry was skipped (post paper-test revision 0.1).
+        // Use the structured evaluator — returns side + score + rejection reason.
+        // evaluateEntry runs hard gates first (volumeSpike_gate, near_high_filter,
+        // whale_stale), then the soft score threshold, then side determination.
+        // The score threshold is now 2.5 (was 3) to accept more candidates on
+        // the thin X Layer market. Hard gates are independent of score — a
+        // score-2.5+ candidate is still rejected if volumeSpike is false.
         const ev = evaluateEntry(signals, market);
 
-        // Score threshold gate (separate from filter + side — kept explicit so
-        // "score too low" rejections are journaled distinctly from side rejections).
-        if (ev.score.score < 3) {
-          logJournal({
-            ts: Date.now(),
-            tick: tickNumber,
-            action: 'entry_rejected',
-            token: tokenAddress,
-            details: {
-              rejection_reason: 'score_too_low',
-              score: ev.score.score,
-              recommended_size: ev.score.recommendedSize,
-              whaleCount: signals.whaleCount,
-              recentWhaleCount: signals.recentWhaleCount,
-              volumeSpike: signals.volumeSpike,
-              priceUp: signals.priceUp,
-              newPool: signals.newPool,
-              socialBuzz: signals.socialBuzz,
-            },
-          });
-          continue;
-        }
-
-        // Journal the structured rejection (filter / side) so we can see over
-        // the next batch whether the new gates (volumeSpike, near-high) are
-        // actually cutting the bad-entry rate.
+        // Journal the structured rejection so we can see over the next batch
+        // whether the hard gates (volumeSpike_gate, near_high_filter, whale_stale)
+        // are actually firing and how often, vs. candidates still failing on
+        // score alone.
         if (ev.rejection !== null) {
           logJournal({
             ts: Date.now(),

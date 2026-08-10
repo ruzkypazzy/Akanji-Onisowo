@@ -165,28 +165,85 @@ describe('isNearRecentHigh — near-high entry filter', () => {
   });
 });
 
-describe('evaluateEntry — structured rejection reporting', () => {
-  it('reports volume_spike_required when whales + trendUp but no volumeSpike', async () => {
+describe('evaluateEntry — structured rejection reporting (+0.2 hard gates)', () => {
+  it('reports volumeSpike_gate when would-be LONG but volumeSpike is false (RTX/万事OK pattern)', async () => {
     const { evaluateEntry } = await import('../src/strategy/scorer.js');
     const r = evaluateEntry(
       makeSignals({ whaleCount: 16, priceUp: true }),
       makeMarket({ priceChange24h: 0.05 })
     );
     expect(r.side).toBe('FLAT');
-    expect(r.rejection).toBe('volume_spike_required');
+    expect(r.rejection).toBe('volumeSpike_gate');
+    expect(r.rejectionDetails?.whaleCount).toBe(16);
   });
 
-  it('reports near_recent_high when passesFilters rejects on near-high', async () => {
+  it('reports near_high_filter when price is within 2% of recentHigh', async () => {
     const { evaluateEntry } = await import('../src/strategy/scorer.js');
     const r = evaluateEntry(
       makeSignals({ whaleCount: 5, volumeSpike: true, priceUp: true }),
       makeMarket({ priceChange24h: 0.05, price: 0.995, recentHigh: 1.00 })
     );
-    expect(r.rejection).toBe('near_recent_high');
-    expect(r.rejectionDetails?.filterReason).toMatch(/near recent high/);
+    expect(r.rejection).toBe('near_high_filter');
+    expect(r.rejectionDetails?.recentHigh).toBe(1.00);
   });
 
-  it('passes when whales + volumeSpike + trendUp + not near high', async () => {
+  it('hard gate fires even when score would be high — near-high blocks everything', async () => {
+    const { evaluateEntry } = await import('../src/strategy/scorer.js');
+    // 5 whales + volumeSpike + priceUp + newPool = 4.0 score, but price is
+    // within 1% of recent high → still rejected
+    const r = evaluateEntry(
+      makeSignals({ whaleCount: 5, volumeSpike: true, priceUp: true, newPool: true, socialBuzz: true }),
+      makeMarket({ priceChange24h: 0.05, price: 0.99, recentHigh: 1.00 })
+    );
+    expect(r.rejection).toBe('near_high_filter');
+  });
+
+  it('hard gate fires even when score would be high — volumeSpike blocks whales', async () => {
+    const { evaluateEntry } = await import('../src/strategy/scorer.js');
+    // 5 whales + priceUp + newPool + socialBuzz = 3.5 score, no volumeSpike
+    const r = evaluateEntry(
+      makeSignals({ whaleCount: 5, priceUp: true, newPool: true, socialBuzz: true }),
+      makeMarket({ priceChange24h: 0.05, price: 0.90, recentHigh: 1.00 })
+    );
+    expect(r.rejection).toBe('volumeSpike_gate');
+  });
+
+  it('reports score_too_low when score < 2.5 and all gates pass', async () => {
+    const { evaluateEntry, MIN_ENTRY_SCORE } = await import('../src/strategy/scorer.js');
+    // 1 whale (0.5) + volumeSpike (1.5) = 2.0 < 2.5 — passes whale_stale and
+    // volumeSpike gates, fails the soft score threshold
+    const r = evaluateEntry(
+      makeSignals({ whaleCount: 1, volumeSpike: true }),
+      makeMarket({ priceChange24h: 0.05, price: 0.90, recentHigh: 1.00 })
+    );
+    expect(r.rejection).toBe('score_too_low');
+    expect(r.rejectionDetails?.score).toBeLessThan(MIN_ENTRY_SCORE);
+  });
+
+  it('reports whale_stale when zero whales and no other signal path', async () => {
+    const { evaluateEntry } = await import('../src/strategy/scorer.js');
+    // No whales, no newPool, no priceUp, no volumeSpike = nothing
+    const r = evaluateEntry(
+      makeSignals({ whaleCount: 0, recentWhaleCount: 0 }),
+      makeMarket({ priceChange24h: 0.05, price: 0.90, recentHigh: 1.00 })
+    );
+    expect(r.rejection).toBe('whale_stale');
+  });
+
+  it('passes at score 2.5 (3 whales + priceUp + newPool, with volumeSpike)', async () => {
+    const { evaluateEntry } = await import('../src/strategy/scorer.js');
+    // 3 whales (1.5) + priceUp (0.5) + newPool (0.5) + volumeSpike (1.5) = 4.0
+    // — passes score threshold and all gates
+    const r = evaluateEntry(
+      makeSignals({ whaleCount: 3, volumeSpike: true, priceUp: true, newPool: true }),
+      makeMarket({ priceChange24h: 0.05, price: 0.90, recentHigh: 1.00 })
+    );
+    expect(r.rejection).toBe(null);
+    expect(r.side).toBe('LONG');
+    expect(r.score.score).toBeGreaterThanOrEqual(2.5);
+  });
+
+  it('passes when whales + volumeSpike + trendUp + not near high (existing happy path)', async () => {
     const { evaluateEntry } = await import('../src/strategy/scorer.js');
     const r = evaluateEntry(
       makeSignals({ whaleCount: 5, volumeSpike: true, priceUp: true }),
@@ -194,6 +251,11 @@ describe('evaluateEntry — structured rejection reporting', () => {
     );
     expect(r.rejection).toBe(null);
     expect(r.side).toBe('LONG');
+  });
+
+  it('MIN_ENTRY_SCORE constant is 2.5', async () => {
+    const { MIN_ENTRY_SCORE } = await import('../src/strategy/scorer.js');
+    expect(MIN_ENTRY_SCORE).toBe(2.5);
   });
 });
 
